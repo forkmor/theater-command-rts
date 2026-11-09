@@ -34,3 +34,4 @@ upload
 *.njsproj
 *.sln
 *.sw?
+/forkmor/
