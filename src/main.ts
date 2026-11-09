@@ -20,9 +20,11 @@ import {
 } from './world/suwalkiMap';
 
 let latestBluePct = 50;
+let latestPreviewCanvas: HTMLCanvasElement | null = null;
 
-function updateTheaterPreviewCanvas(bluePct = latestBluePct): void {
+function updateTheaterPreviewCanvas(bluePct = latestBluePct, previewCanvas = latestPreviewCanvas): void {
   latestBluePct = bluePct;
+  if (previewCanvas) latestPreviewCanvas = previewCanvas;
   const canvas = document.getElementById('global-map-canvas') as HTMLCanvasElement | null;
   if (!canvas) return;
   const ctx = canvas.getContext('2d')!;
@@ -30,17 +32,17 @@ function updateTheaterPreviewCanvas(bluePct = latestBluePct): void {
   const h = canvas.height;
 
   const osmSector = getActiveOsmSector();
-  if (osmSector) {
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(osmSector.tileCanvas, 0, 0, w, h);
+  if (osmSector && latestPreviewCanvas) {
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(latestPreviewCanvas, 0, 0, w, h);
 
-    // Top bar overlay showing live OpenStreetMap sector title & coordinates
-    ctx.fillStyle = 'rgba(9, 16, 22, 0.78)';
+    // Top bar overlay showing live 1:1 scale OpenStreetMap sector title & coordinates
+    ctx.fillStyle = 'rgba(9, 16, 22, 0.82)';
     ctx.fillRect(0, 0, w, 20);
     ctx.font = 'bold 10px monospace';
     ctx.fillStyle = '#66bb6a';
     ctx.fillText(
-      `OSM LIVE: ${osmSector.bounds.title} (${osmSector.bounds.centerLat.toFixed(3)}°N, ${osmSector.bounds.centerLon.toFixed(3)}°E)`,
+      `1:1 VECTOR GIS: ${osmSector.bounds.title} (1.6km × 1.2km)`,
       6,
       13,
     );
@@ -49,7 +51,7 @@ function updateTheaterPreviewCanvas(bluePct = latestBluePct): void {
     ctx.fillRect(0, 0, w, h);
     ctx.font = 'bold 11px monospace';
     ctx.fillStyle = '#4fc3f7';
-    ctx.fillText('STREAMING REAL OPENSTREETMAP TILES & OVERPASS GIS...', 14, h * 0.5);
+    ctx.fillText('STREAMING 1:1 SCALE OVERPASS GIS VECTORS...', 18, h * 0.5);
   }
 
   const redPct = 100 - bluePct;
@@ -110,7 +112,7 @@ async function bootstrap(): Promise<void> {
       renderer.bindSimulation(previewSim, 'blue');
       renderer.camX = WORLD_WIDTH * 0.5;
       renderer.camY = WORLD_HEIGHT * 0.5;
-      renderer.zoom = 0.88;
+      renderer.zoom = 1.0;
     }
   };
 
@@ -132,10 +134,9 @@ async function bootstrap(): Promise<void> {
           if (elNetStatus) elNetStatus.textContent = 'STREAMING OPENSTREETMAP...';
         });
         setActiveOsmSector(data);
-        updateTheaterPreviewCanvas();
         if (elOsmStatus) {
           elOsmStatus.className = 'osm-live-status ok';
-          elOsmStatus.textContent = `OSM LIVE READY // ${data.stats.buildings.toLocaleString()} BUILDINGS • ${data.stats.roads} ROADS • ${data.stats.railways} RAILS • ${data.stats.bridges} BRIDGES`;
+          elOsmStatus.textContent = `OSM LIVE READY // ${data.stats.buildings.toLocaleString()} BUILDINGS • ${data.stats.roads} ROAD SPLINES • ${data.stats.railways} RAILS • ${data.stats.bridges} BRIDGES`;
         }
         if (elNetStatus) {
           elNetStatus.textContent = `OSM LIVE: ${data.stats.buildings.toLocaleString()} BLDGS`;
@@ -147,8 +148,9 @@ async function bootstrap(): Promise<void> {
           renderer.bindSimulation(previewSim, 'blue');
           renderer.camX = WORLD_WIDTH * 0.5;
           renderer.camY = WORLD_HEIGHT * 0.5;
-          renderer.zoom = 0.88;
+          renderer.zoom = 1.0;
         }
+        updateTheaterPreviewCanvas(latestBluePct, renderer.minimapBaseCanvas);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (elOsmStatus) {

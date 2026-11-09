@@ -90,14 +90,24 @@ export class WorldRenderer {
     this.nodePool.clear();
     this.trainPool.clear();
 
-    // Bake real OpenStreetMap Z15 tile map + Overpass GIS vector infrastructure
+    // Bake full 1:1 native resolution (3200x2400) vector GIS terrain, spline roads & building sprites
     const { terrainTex, topoTex } = this.bakeTerrainTextures(sim.map);
     this.terrainSprite = new Sprite(terrainTex);
-    this.terrainSprite.scale.set(2);
+    this.terrainSprite.scale.set(1);
 
     this.topoSprite = new Sprite(topoTex);
-    this.topoSprite.scale.set(2);
+    this.topoSprite.scale.set(1);
     this.topoSprite.visible = this.showTopoOverlay;
+
+    // Populate pixel forest canopy trees (scaled to 1px = 0.5m)
+    for (const tr of sim.map.treePositions) {
+      const sp = new Sprite(this.atlas.treeTextures[tr.kind % this.atlas.treeTextures.length]);
+      sp.anchor.set(0.5);
+      sp.scale.set(0.65);
+      sp.x = Math.round(tr.x);
+      sp.y = Math.round(tr.y);
+      this.treeContainer.addChild(sp);
+    }
 
     // Fog of War overlay sprite
     const fogTex = new Texture({ source: this.fogSource });
@@ -128,18 +138,15 @@ export class WorldRenderer {
   }
 
   private bakeTerrainTextures(map: SuwalkiMap): { terrainTex: Texture; topoTex: Texture } {
-    const bw = WORLD_WIDTH / 2; // 1600
-    const bh = WORLD_HEIGHT / 2; // 1200
+    const bw = WORLD_WIDTH; // 3200 (full 1:1 native resolution, 1px = 0.50m)
+    const bh = WORLD_HEIGHT; // 2400
 
     const canvas = document.createElement('canvas');
     canvas.width = bw;
     canvas.height = bh;
     const ctx = canvas.getContext('2d')!;
-    ctx.imageSmoothingEnabled = true;
-
-    // 1. Draw the real stitched OpenStreetMap Z15 tiles directly onto the terrain canvas
-    ctx.drawImage(map.tileCanvas, 0, 0, bw, bh);
-    const img = ctx.getImageData(0, 0, bw, bh);
+    ctx.imageSmoothingEnabled = false;
+    const img = ctx.createImageData(bw, bh);
     const data = img.data;
 
     const topoCanvas = document.createElement('canvas');
@@ -149,32 +156,79 @@ export class WorldRenderer {
     const topoImg = topoCtx.createImageData(bw, bh);
     const topoData = topoImg.data;
 
-    // 2. Apply subtle DEM hillshading from Open-Meteo elevation + build Topographic Contour overlay
+    // 1. Full-Resolution Pixel-Art Terrain, Bathymetry & Open-Meteo DEM Hillshading
     for (let py = 0; py < bh; py++) {
-      const wy = py * 2;
+      const wy = py;
       for (let px = 0; px < bw; px++) {
-        const wx = px * 2;
+        const wx = px;
         const elev = map.getElevation(wx, wy);
+        const lc = map.getLandcover(wx, wy);
+
         const eNW = map.getElevation(wx - 6, wy - 6);
-        const shade = Math.max(-14, Math.min(16, (elev - eNW) * 2.5));
+        const shade = Math.max(-18, Math.min(20, (elev - eNW) * 3.2));
+        const dither = ((px + py) & 1) === 0 ? 2 : -2;
+
+        let r = 54;
+        let g = 72;
+        let b = 47;
+
+        if (elev < -6) {
+          // Deep river channel / harbour basin / Baltic sea
+          r = 18;
+          g = 42;
+          b = 60;
+        } else if (elev < 0) {
+          // Shallow coastal / riverbank water
+          r = 28;
+          g = 62;
+          b = 84;
+        } else if (elev < 2.3) {
+          // Sandy / gravel riverbank shoreline
+          r = 122;
+          g = 114;
+          b = 86;
+        } else if (lc === 'urban' || lc === 'paved') {
+          // Urban block courtyard / concrete lot beneath buildings
+          r = 64;
+          g = 70;
+          b = 74;
+        } else if (lc === 'forest') {
+          // Woodland & park ground
+          r = 40;
+          g = 60;
+          b = 39;
+        } else if (elev > 55) {
+          r = 96;
+          g = 102;
+          b = 72;
+        } else if (elev > 30) {
+          r = 72;
+          g = 88;
+          b = 56;
+        }
 
         const idx = (py * bw + px) * 4;
-        // Preserve authentic OpenStreetMap colors & text labels with slight tactical contrast + DEM hillshade
-        data[idx] = Math.max(0, Math.min(255, Math.round(data[idx] * 0.88 + shade)));
-        data[idx + 1] = Math.max(0, Math.min(255, Math.round(data[idx + 1] * 0.88 + shade)));
-        data[idx + 2] = Math.max(0, Math.min(255, Math.round(data[idx + 2] * 0.9 + shade * 0.6)));
+        data[idx] = Math.max(0, Math.min(255, Math.round(r + shade + dither)));
+        data[idx + 1] = Math.max(0, Math.min(255, Math.round(g + shade + dither)));
+        data[idx + 2] = Math.max(
+          0,
+          Math.min(255, Math.round(b + (elev < 0 ? dither : shade * 0.7))),
+        );
         data[idx + 3] = 255;
 
-        // Topographic Contour Check (every 15m above sea level for TOPO overlay)
-        if (elev > 2) {
-          const band = Math.floor(elev / 15);
-          const bandR = Math.floor(map.getElevation(wx + 2, wy) / 15);
-          const bandD = Math.floor(map.getElevation(wx, wy + 2) / 15);
+        // Topographic Contour Check (every 12m above sea level)
+        if (elev > 2.5) {
+          const band = Math.floor(elev / 12);
+          const bandR = Math.floor(map.getElevation(wx + 2, wy) / 12);
+          const bandD = Math.floor(map.getElevation(wx, wy + 2) / 12);
           if (band !== bandR || band !== bandD) {
+            data[idx] = Math.min(255, data[idx] + 10);
+            data[idx + 1] = Math.min(255, data[idx + 1] + 10);
+
             topoData[idx] = 245;
             topoData[idx + 1] = 194;
             topoData[idx + 2] = 66;
-            topoData[idx + 3] = band % 2 === 0 ? 195 : 115;
+            topoData[idx + 3] = band % 2 === 0 ? 190 : 110;
           }
         }
       }
@@ -183,130 +237,352 @@ export class WorldRenderer {
     ctx.putImageData(img, 0, 0);
     topoCtx.putImageData(topoImg, 0, 0);
 
-    // 3. Highlight Real Overpass Spline Highways & Railroads (aligned in Web Mercator EPSG:3857)
+    // 2. Concrete Seaport Piers, Quays & Breakwaters
+    ctx.save();
+    ctx.fillStyle = '#525b61';
+    ctx.strokeStyle = '#78858d';
+    ctx.lineWidth = 2;
+    for (const poly of map.pierPolygons) {
+      if (poly.length < 3) continue;
+      ctx.beginPath();
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+    for (const pw of map.pierWays) {
+      if (pw.points.length < 2) continue;
+      ctx.strokeStyle = '#262c30';
+      ctx.lineWidth = pw.width + 4;
+      ctx.beginPath();
+      pw.points.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+
+      ctx.strokeStyle = '#586269';
+      ctx.lineWidth = pw.width;
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // 3. Multi-Pass Continuous Vector Road Splines (Curbs -> Asphalt Surface -> Lane Markings)
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Pass 3A: Dark Asphalt Curbs / Roadbed Casing (merges all intersections seamlessly)
+    ctx.strokeStyle = '#1a1f22';
+    for (const st of map.streetPolylines) {
+      if (st.points.length < 2) continue;
+      ctx.lineWidth = st.width + 3;
+      ctx.beginPath();
+      st.points.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+    }
     for (const sp of map.splines) {
-      if (sp.kind === 'highway') {
-        ctx.save();
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.strokeStyle = 'rgba(245, 194, 66, 0.45)';
-        ctx.lineWidth = 3.2;
-        ctx.beginPath();
-        sp.points.forEach((p, idx) => {
-          if (idx === 0) ctx.moveTo(p.x / 2, p.y / 2);
-          else ctx.lineTo(p.x / 2, p.y / 2);
-        });
-        ctx.stroke();
-
-        ctx.strokeStyle = 'rgba(255, 235, 130, 0.75)';
-        ctx.lineWidth = 1.0;
-        ctx.setLineDash([4, 5]);
-        ctx.stroke();
-        ctx.restore();
-      } else {
-        // Real Overpass Railway Tracks (wooden sleepers + steel rails)
-        ctx.save();
-        ctx.strokeStyle = 'rgba(71, 63, 54, 0.78)';
-        ctx.lineWidth = 4.0;
-        ctx.beginPath();
-        sp.points.forEach((p, idx) => {
-          if (idx === 0) ctx.moveTo(p.x / 2, p.y / 2);
-          else ctx.lineTo(p.x / 2, p.y / 2);
-        });
-        ctx.stroke();
-
-        ctx.strokeStyle = 'rgba(38, 32, 27, 0.88)';
-        ctx.lineWidth = 3.2;
-        ctx.setLineDash([2, 3]);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        ctx.strokeStyle = 'rgba(190, 208, 216, 0.88)';
-        ctx.lineWidth = 1.3;
-        ctx.stroke();
-        ctx.restore();
-      }
+      if (sp.kind !== 'highway' || sp.points.length < 2) continue;
+      ctx.lineWidth = 24;
+      ctx.beginPath();
+      sp.points.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
     }
 
-    // 4. Draw Real OSM Aeroways (Runways, Taxiways, Aprons) if present
+    // Pass 3B: Continuous Paved Asphalt Roadway Surface
+    for (const st of map.streetPolylines) {
+      if (st.points.length < 2) continue;
+      const isArterial = /^(motorway|trunk|primary|secondary)/.test(st.highwayClass);
+      ctx.strokeStyle = isArterial ? '#3d464d' : '#31383d';
+      ctx.lineWidth = st.width;
+      ctx.beginPath();
+      st.points.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+    }
+    for (const sp of map.splines) {
+      if (sp.kind !== 'highway' || sp.points.length < 2) continue;
+      ctx.strokeStyle = '#434d54';
+      ctx.lineWidth = 20;
+      ctx.beginPath();
+      sp.points.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+    }
+
+    // Pass 3C: Crisp Centerline & Lane Dividers
+    for (const st of map.streetPolylines) {
+      if (st.points.length < 2 || st.width < 13) continue;
+      const isPrimary = /^(motorway|trunk|primary)/.test(st.highwayClass);
+      ctx.strokeStyle = isPrimary ? '#e6b83a' : 'rgba(207, 216, 220, 0.55)';
+      ctx.lineWidth = isPrimary ? 1.5 : 1.0;
+      ctx.setLineDash(isPrimary ? [8, 6] : [5, 6]);
+      ctx.beginPath();
+      st.points.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    // 4. Real 1:1 Scale Vector Railway Splines (Gravel Ballast, Wooden Sleepers & Twin Steel Rails)
+    for (const sp of map.splines) {
+      if (sp.kind !== 'railroad' || sp.points.length < 2) continue;
+      ctx.save();
+      ctx.lineCap = 'butt';
+      ctx.lineJoin = 'round';
+
+      // Crushed granite ballast bed (12px = 6m wide)
+      ctx.strokeStyle = '#4a4137';
+      ctx.lineWidth = 12;
+      ctx.beginPath();
+      sp.points.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+      ctx.stroke();
+
+      // Timber / concrete crossties (sleepers)
+      ctx.strokeStyle = '#221c17';
+      ctx.lineWidth = 9.5;
+      ctx.setLineDash([2, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Twin parallel steel rails (outer steel stroke + inner dark center gauge)
+      ctx.strokeStyle = '#b0bec5';
+      ctx.lineWidth = 5.5;
+      ctx.stroke();
+
+      ctx.strokeStyle = '#2e2721';
+      ctx.lineWidth = 2.8;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 5. Real OSM Aeroways (Runways, Taxiways, Aprons)
     for (const aw of map.aeroways) {
       if (aw.points.length < 2) continue;
       ctx.save();
       ctx.lineCap = 'butt';
       ctx.lineJoin = 'round';
-      ctx.strokeStyle = 'rgba(35, 41, 44, 0.85)';
-      ctx.lineWidth = aw.width * 0.5 + 2;
+      ctx.strokeStyle = '#202629';
+      ctx.lineWidth = aw.width + 4;
       ctx.beginPath();
-      aw.points.forEach((p, idx) => {
-        if (idx === 0) ctx.moveTo(p.x / 2, p.y / 2);
-        else ctx.lineTo(p.x / 2, p.y / 2);
-      });
+      aw.points.forEach((p, idx) => (idx === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
       ctx.stroke();
 
-      ctx.strokeStyle = 'rgba(56, 65, 70, 0.88)';
-      ctx.lineWidth = aw.width * 0.5;
+      ctx.strokeStyle = '#374046';
+      ctx.lineWidth = aw.width;
       ctx.stroke();
 
       if (aw.kind === 'runway') {
         ctx.strokeStyle = '#eceff1';
-        ctx.lineWidth = 1.2;
-        ctx.setLineDash([5, 5]);
+        ctx.lineWidth = 2.0;
+        ctx.setLineDash([10, 8]);
         ctx.stroke();
       }
       ctx.restore();
     }
 
-    // 5. Draw Real Overpass Building Polygons (3D Roof Shadow + Tactical Footprint Outline)
+    // 6. Individual Real-Scale Pixel-Art Building Sprites & Structures (1px = 0.50m)
     for (const b of map.urbanBlocks) {
-      let roofOuter = 'rgba(92, 68, 58, 0.88)';
-      let roofInner = 'rgba(158, 108, 88, 0.68)'; // European terracotta roof
+      let wallColor = '#2b201c';
+      let roofOuter = '#4d352c';
+      let roofInner = '#8c5846'; // Pitched European terracotta roof
       if (b.kind === 'civic' || b.tall) {
-        roofOuter = 'rgba(65, 82, 92, 0.9)';
-        roofInner = 'rgba(101, 124, 138, 0.72)';
+        wallColor = '#222b30';
+        roofOuter = '#3b4a54';
+        roofInner = '#5d7280';
       } else if (b.kind === 'industrial' || b.kind === 'warehouse') {
-        roofOuter = 'rgba(63, 70, 74, 0.9)';
-        roofInner = 'rgba(95, 104, 110, 0.72)';
+        wallColor = '#212629';
+        roofOuter = '#373e42';
+        roofInner = '#545e63';
       } else if (b.kind === 'hangar') {
-        roofOuter = 'rgba(54, 69, 56, 0.9)';
-        roofInner = 'rgba(78, 97, 80, 0.72)';
+        wallColor = '#1e2720';
+        roofOuter = '#314033';
+        roofInner = '#495c4b';
       } else if (b.kind === 'silo') {
-        roofOuter = 'rgba(144, 164, 174, 0.9)';
-        roofInner = 'rgba(207, 216, 220, 0.78)';
+        wallColor = '#455a64';
+        roofOuter = '#78909c';
+        roofInner = '#cfd8dc';
       }
 
-      if (b.polygon && b.polygon.length >= 3) {
-        const shadowOffset = b.tall ? 2.0 : 1.2;
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
+      if (b.kind === 'silo') {
+        const rad = Math.max(6, Math.min(b.w, b.h) * 0.48);
+        ctx.save();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.46)';
         ctx.beginPath();
-        ctx.moveTo(b.polygon[0].x / 2 + shadowOffset, b.polygon[0].y / 2 + shadowOffset);
-        for (let i = 1; i < b.polygon.length; i++) {
-          ctx.lineTo(b.polygon[i].x / 2 + shadowOffset, b.polygon[i].y / 2 + shadowOffset);
-        }
-        ctx.closePath();
+        ctx.arc(b.x + 5, b.y + 5, rad, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = wallColor;
+        ctx.beginPath();
+        ctx.arc(b.x + 2, b.y + 2, rad, 0, Math.PI * 2);
         ctx.fill();
 
         ctx.fillStyle = roofInner;
         ctx.strokeStyle = roofOuter;
-        ctx.lineWidth = 0.85;
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(b.polygon[0].x / 2, b.polygon[0].y / 2);
+        ctx.arc(b.x, b.y, rad, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Specular dome highlight & top inspection bridge
+        ctx.fillStyle = '#eceff1';
+        ctx.beginPath();
+        ctx.arc(b.x - rad * 0.25, b.y - rad * 0.25, rad * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#546e7a';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(b.x - rad * 0.8, b.y);
+        ctx.lineTo(b.x + rad * 0.8, b.y);
+        ctx.stroke();
+        ctx.restore();
+        continue;
+      }
+
+      if (b.polygon && b.polygon.length >= 3) {
+        const shadowOff = b.tall ? 7 : 4;
+        const wallOff = b.tall ? 3.5 : 2.0;
+
+        // 6A. 3D Sun Drop Shadow (SE cast)
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.beginPath();
+        ctx.moveTo(b.polygon[0].x + shadowOff, b.polygon[0].y + shadowOff);
         for (let i = 1; i < b.polygon.length; i++) {
-          ctx.lineTo(b.polygon[i].x / 2, b.polygon[i].y / 2);
+          ctx.lineTo(b.polygon[i].x + shadowOff, b.polygon[i].y + shadowOff);
         }
         ctx.closePath();
         ctx.fill();
+
+        // 6B. 3D Extruded Masonry / Concrete Facade Wall
+        ctx.fillStyle = wallColor;
+        ctx.beginPath();
+        ctx.moveTo(b.polygon[0].x + wallOff, b.polygon[0].y + wallOff);
+        for (let i = 1; i < b.polygon.length; i++) {
+          ctx.lineTo(b.polygon[i].x + wallOff, b.polygon[i].y + wallOff);
+        }
+        ctx.closePath();
+        ctx.fill();
+
+        // 6C. Exact Building Roof Polygon + Clipped Pixel-Art Rooftop Architecture
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(b.polygon[0].x, b.polygon[0].y);
+        for (let i = 1; i < b.polygon.length; i++) {
+          ctx.lineTo(b.polygon[i].x, b.polygon[i].y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = roofInner;
+        ctx.fill();
+
+        // Clip interior rooftop details to the exact OpenStreetMap building polygon
+        ctx.clip();
+        ctx.translate(b.x, b.y);
+        ctx.rotate(b.angle);
+        const hw = b.w * 0.5;
+        const hh = b.h * 0.5;
+
+        if (b.kind === 'industrial' || b.kind === 'warehouse' || b.kind === 'hangar') {
+          // Corrugated steel roof ribs + skylights
+          ctx.strokeStyle = 'rgba(25, 32, 36, 0.45)';
+          ctx.lineWidth = 1;
+          for (let rx = -hw; rx <= hw; rx += 6) {
+            ctx.beginPath();
+            ctx.moveTo(rx, -hh - 10);
+            ctx.lineTo(rx, hh + 10);
+            ctx.stroke();
+          }
+          if (b.w >= 24 && b.h >= 14) {
+            ctx.fillStyle = '#33424a';
+            ctx.fillRect(-hw * 0.65, -hh * 0.22, hw * 1.3, Math.max(3, hh * 0.44));
+            ctx.fillStyle = '#809ba8';
+            for (let sx = -hw * 0.58; sx < hw * 0.52; sx += 10) {
+              ctx.fillRect(sx, -hh * 0.14, 6, Math.max(2, hh * 0.28));
+            }
+          }
+        } else if (b.kind === 'civic' || b.tall) {
+          // Multi-story flat concrete/bitumen roof with parapet border, elevator housing & HVAC units
+          ctx.strokeStyle = 'rgba(30, 40, 46, 0.65)';
+          ctx.lineWidth = 4;
+          ctx.strokeRect(-hw + 2, -hh + 2, b.w - 4, b.h - 4);
+
+          if (b.w >= 22 && b.h >= 14) {
+            // Elevator / Stairwell penthouse
+            const pw = Math.min(14, b.w * 0.24);
+            const ph = Math.min(10, b.h * 0.35);
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
+            ctx.fillRect(-pw * 0.5 + 2, -ph * 0.5 + 2, pw, ph);
+            ctx.fillStyle = '#738996';
+            ctx.fillRect(-pw * 0.5, -ph * 0.5, pw, ph);
+
+            // Pixel HVAC units along roof deck
+            ctx.fillStyle = '#90a4ae';
+            const step = 12;
+            for (let ux = -hw + 8; ux < hw - 8; ux += step) {
+              if (Math.abs(ux) < pw * 0.7) continue;
+              ctx.fillRect(ux, -2, 5, 5);
+              ctx.fillStyle = '#263238';
+              ctx.fillRect(ux + 1, -1, 3, 3);
+              ctx.fillStyle = '#90a4ae';
+            }
+          }
+        } else {
+          // Pitched Residential Roof: NW sunlit slope + SE shaded slope + central ridge beam & chimney
+          ctx.fillStyle = 'rgba(255, 235, 215, 0.14)';
+          ctx.fillRect(-hw - 10, -hh - 10, b.w + 20, hh + 10);
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
+          ctx.fillRect(-hw - 10, 0, b.w + 20, hh + 10);
+
+          // Central terracotta roof ridge line
+          const ridgeHalf = Math.max(2, hw - Math.min(hw * 0.4, hh * 0.7));
+          ctx.strokeStyle = '#c4836d';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(-ridgeHalf, 0);
+          ctx.lineTo(ridgeHalf, 0);
+          ctx.stroke();
+
+          // Hip / gable corner rafters
+          ctx.strokeStyle = 'rgba(62, 39, 32, 0.55)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(-hw, -hh);
+          ctx.lineTo(-ridgeHalf, 0);
+          ctx.lineTo(-hw, hh);
+          ctx.moveTo(hw, -hh);
+          ctx.lineTo(ridgeHalf, 0);
+          ctx.lineTo(hw, hh);
+          ctx.stroke();
+
+          // Brick chimney pixel detail
+          if (b.w >= 14 && b.h >= 10) {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+            ctx.fillRect(ridgeHalf * 0.35 + 1, -4, 4, 4);
+            ctx.fillStyle = '#4e2c22';
+            ctx.fillRect(ridgeHalf * 0.35, -5, 4, 4);
+            ctx.fillStyle = '#1c1614';
+            ctx.fillRect(ridgeHalf * 0.35 + 1, -4, 2, 2);
+          }
+        }
+        ctx.restore();
+
+        // 6D. Crisp Outer Eaves Outline
+        ctx.strokeStyle = roofOuter;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(b.polygon[0].x, b.polygon[0].y);
+        for (let i = 1; i < b.polygon.length; i++) {
+          ctx.lineTo(b.polygon[i].x, b.polygon[i].y);
+        }
+        ctx.closePath();
         ctx.stroke();
       }
     }
 
-    // Bake Minimap Base Image from the real OpenStreetMap + Overpass canvas
+    // Bake Minimap Base Image from the full-scale vector GIS canvas
     const mctx = this.minimapBaseCanvas.getContext('2d')!;
     mctx.imageSmoothingEnabled = true;
     mctx.drawImage(canvas, 0, 0, this.minimapBaseCanvas.width, this.minimapBaseCanvas.height);
 
     return {
       terrainTex: new Texture({
-        source: new CanvasSource({ resource: canvas, scaleMode: 'linear' }),
+        source: new CanvasSource({ resource: canvas, scaleMode: 'nearest' }),
       }),
       topoTex: new Texture({
         source: new CanvasSource({ resource: topoCanvas, scaleMode: 'nearest' }),
@@ -382,8 +658,8 @@ export class WorldRenderer {
           .stroke({ width: 16, color: br.kind === 'railroad' ? 0x3e352f : 0x2c3338 });
         if (br.hp < br.maxHp) {
           const pct = br.hp / br.maxHp;
-          g.rect(br.x - 24, br.y - 22, 48, 4).fill({ color: 0x111618 });
-          g.rect(br.x - 24, br.y - 22, 48 * pct, 4).fill({ color: 0xffb300 });
+          g.rect(br.x - 20, br.y - 18, 40, 3.5).fill({ color: 0x111618 });
+          g.rect(br.x - 20, br.y - 18, 40 * pct, 3.5).fill({ color: 0xffb300 });
         }
       } else {
         // Shattered bridge abutments + submerged gap!
@@ -400,9 +676,9 @@ export class WorldRenderer {
         const b = sp.points[segIdx + 1];
         const mx = (a.x + b.x) * 0.5;
         const my = (a.y + b.y) * 0.5;
-        g.circle(mx, my, 10).fill({ color: 0x1a1d1e, alpha: 0.9 });
-        g.moveTo(mx - 6, my - 6).lineTo(mx + 6, my + 6).stroke({ width: 2, color: 0xef5350 });
-        g.moveTo(mx + 6, my - 6).lineTo(mx - 6, my + 6).stroke({ width: 2, color: 0xef5350 });
+        g.circle(mx, my, 9).fill({ color: 0x1a1d1e, alpha: 0.9 });
+        g.moveTo(mx - 5, my - 5).lineTo(mx + 5, my + 5).stroke({ width: 2, color: 0xef5350 });
+        g.moveTo(mx + 5, my - 5).lineTo(mx - 5, my + 5).stroke({ width: 2, color: 0xef5350 });
       }
     }
 
@@ -433,13 +709,13 @@ export class WorldRenderer {
       g.circle(nd.x, nd.y, nd.radius).stroke({
         width: 1.5,
         color: fColor,
-        alpha: nd.supplied ? 0.55 : 0.25,
+        alpha: nd.supplied ? 0.5 : 0.25,
       });
 
       if (Math.abs(nd.captureProgress) > 1 && Math.abs(nd.captureProgress) < 100) {
         const capColor = nd.captureProgress > 0 ? 0x42b0ff : 0xef5350;
         const arcEnd = -Math.PI * 0.5 + (Math.abs(nd.captureProgress) / 100) * Math.PI * 2;
-        g.arc(nd.x, nd.y, nd.radius + 5, -Math.PI * 0.5, arcEnd).stroke({
+        g.arc(nd.x, nd.y, nd.radius + 4, -Math.PI * 0.5, arcEnd).stroke({
           width: 3,
           color: capColor,
           alpha: 0.9,
@@ -448,8 +724,8 @@ export class WorldRenderer {
 
       if (nd.hp < nd.maxHp || nd.destroyed) {
         const pct = Math.max(0, nd.hp / nd.maxHp);
-        g.rect(nd.x - 24, nd.y - 38, 48, 4).fill({ color: 0x101416 });
-        g.rect(nd.x - 24, nd.y - 38, 48 * pct, 4).fill({
+        g.rect(nd.x - 20, nd.y - 28, 40, 3.5).fill({ color: 0x101416 });
+        g.rect(nd.x - 20, nd.y - 28, 40 * pct, 3.5).fill({
           color: nd.destroyed ? 0xef5350 : 0x66bb6a,
         });
       }
@@ -467,14 +743,16 @@ export class WorldRenderer {
     const root = new Container();
     const base = new Sprite(this.atlas.getNodeTexture(nd.type, nd.faction));
     base.anchor.set(0.5);
+    base.scale.set(0.68);
     root.addChild(base);
 
     let radarDish: Sprite | undefined;
     if (nd.type === 'radar_station' || nd.type === 'airfield' || nd.type === 'hq') {
       radarDish = new Sprite(this.atlas.radarDishTexture);
       radarDish.anchor.set(0.5);
-      radarDish.x = nd.type === 'radar_station' ? 0 : 16;
-      radarDish.y = nd.type === 'radar_station' ? 0 : -16;
+      radarDish.scale.set(0.68);
+      radarDish.x = nd.type === 'radar_station' ? 0 : 11;
+      radarDish.y = nd.type === 'radar_station' ? 0 : -11;
       root.addChild(radarDish);
     }
 
@@ -491,20 +769,20 @@ export class WorldRenderer {
       text: `${nd.name.toUpperCase()}${badge}`,
       style: {
         fontFamily: 'monospace',
-        fontSize: 10,
+        fontSize: 9,
         fontWeight: 'bold',
         fill: 0xe8f1f5,
         stroke: { color: 0x070b0d, width: 3 },
       },
     });
     label.anchor.set(0.5, 0);
-    label.y = 35;
+    label.y = 24;
 
     const labelBg = new Graphics();
-    const lw = label.width + 10;
-    const lh = label.height + 3;
+    const lw = label.width + 8;
+    const lh = label.height + 2;
     labelBg
-      .roundRect(-lw * 0.5, 34, lw, lh, 3)
+      .roundRect(-lw * 0.5, 23, lw, lh, 3)
       .fill({ color: 0x090e11, alpha: 0.78 })
       .stroke({ width: 1, color: 0x26353d, alpha: 0.7 });
 
@@ -536,15 +814,14 @@ export class WorldRenderer {
           if (aSup && bSup) {
             const color = sp.kind === 'railroad' ? 0xffca28 : 0x4dd0e1;
             g.moveTo(a.x, a.y).lineTo(b.x, b.y).stroke({
-              width: 2.5,
+              width: 2.2,
               color,
               alpha: 0.38,
             });
-            // Animated supply pulse packet flowing along line!
             const phase = (sim.elapsedSec * 0.45 + i * 0.23) % 1;
             const px = a.x + (b.x - a.x) * phase;
             const py = a.y + (b.y - a.y) * phase;
-            g.circle(px, py, 3.2).fill({ color, alpha: 0.8 });
+            g.circle(px, py, 2.8).fill({ color, alpha: 0.8 });
           }
         }
       }
@@ -579,13 +856,12 @@ export class WorldRenderer {
       const def = UNIT_DEFS[u.type];
       const visualAltOffset = Math.max(0, u.z - Math.max(0, sim.map.getElevation(u.x, u.y))) * 0.35;
 
-      g.circle(u.x, u.y - visualAltOffset, def.radius + 5).stroke({
-        width: 1.6,
+      g.circle(u.x, u.y - visualAltOffset, def.radius + 3.5).stroke({
+        width: 1.5,
         color: 0x69f0ae,
         alpha: 0.95,
       });
 
-      // Primary Weapon Range Envelope for selected unit (if single or few selected)
       if (selectedIds.size <= 4) {
         g.circle(u.x, u.y, def.primaryWeapon.range).stroke({
           width: 1,
@@ -594,7 +870,6 @@ export class WorldRenderer {
         });
       }
 
-      // Draw Movement / Attack Order Lines
       if (u.waypoints.length > 0 && u.waypointIdx < u.waypoints.length) {
         const ord = u.orders[0];
         const lineColor =
@@ -606,14 +881,14 @@ export class WorldRenderer {
         for (let w = u.waypointIdx; w < u.waypoints.length; w++) {
           const wp = u.waypoints[w];
           g.moveTo(lx, ly).lineTo(wp.x, wp.y).stroke({
-            width: 1.5,
+            width: 1.4,
             color: lineColor,
             alpha: 0.65,
           });
           lx = wp.x;
           ly = wp.y;
         }
-        g.circle(lx, ly, 4).fill({ color: lineColor, alpha: 0.85 });
+        g.circle(lx, ly, 3.2).fill({ color: lineColor, alpha: 0.85 });
       }
     }
   }
@@ -626,7 +901,7 @@ export class WorldRenderer {
     const g = this.fxGraphics;
     g.clear();
 
-    // 1. Render Military Reinforcement Trains
+    // 1. Render Military Reinforcement Trains (scaled to 1px = 0.50m rail gauge)
     const activeTrains = new Set<number>();
     for (const tr of sim.trains) {
       if (tr.faction !== viewerFaction && sim.isCellVisible(viewerFaction, tr.x, tr.y) === 0) {
@@ -639,10 +914,13 @@ export class WorldRenderer {
           tr.faction === 'blue' ? this.atlas.trainLocoBlue : this.atlas.trainLocoRed,
         );
         loco.anchor.set(0.5);
+        loco.scale.set(0.62);
         const car1 = new Sprite(this.atlas.trainFlatbed);
         car1.anchor.set(0.5);
+        car1.scale.set(0.62);
         const car2 = new Sprite(this.atlas.trainFlatbed);
         car2.anchor.set(0.5);
+        car2.scale.set(0.62);
         this.groundUnitContainer.addChild(car2, car1, loco);
         tItem = { loco, cars: [car1, car2] };
         this.trainPool.set(tr.id, tItem);
@@ -651,7 +929,7 @@ export class WorldRenderer {
       tItem.loco.y = tr.y;
       tItem.loco.rotation = tr.angle;
       tItem.cars.forEach((c, idx) => {
-        const distBack = (idx + 1) * 32;
+        const distBack = (idx + 1) * 19;
         c.x = tr.x - Math.cos(tr.angle) * distBack;
         c.y = tr.y - Math.sin(tr.angle) * distBack;
         c.rotation = tr.angle;
@@ -665,7 +943,7 @@ export class WorldRenderer {
       }
     }
 
-    // 2. Render Units (with 3D Altitude Shadow Offset & Turrets!)
+    // 2. Render Real-Scale Units (with 3D Altitude Shadow Offset & Turrets!)
     const activeUnitIds = new Set<number>();
     for (const u of sim.units) {
       if (u.hp <= 0 || u.insideTransportId !== null) continue;
@@ -690,9 +968,8 @@ export class WorldRenderer {
       item.root.x = u.x;
       item.root.y = u.y;
 
-      // Ground drop shadow stays near ground while aircraft rises visually!
-      item.shadow.x = isAir ? 8 : 2;
-      item.shadow.y = isAir ? 6 : 2;
+      item.shadow.x = isAir ? 6 : 1.8;
+      item.shadow.y = isAir ? 5 : 1.8;
       item.shadow.rotation = u.angle;
       item.shadow.alpha = isAir ? 0.34 : 0.42;
 
@@ -707,46 +984,45 @@ export class WorldRenderer {
       }
 
       if (item.rotor) {
-        item.rotor.x = 2;
+        item.rotor.x = 1.5;
         item.rotor.y = -altVisualOffset;
         item.rotor.rotation = sim.elapsedSec * 22;
       }
 
-      // Naval water wake behind moving ships
       if (def.domain === 'sea' && Math.hypot(u.vx, u.vy) > 4) {
-        const wx = u.x - Math.cos(u.angle) * (def.radius + 8);
-        const wy = u.y - Math.sin(u.angle) * (def.radius + 8);
-        g.circle(wx, wy, 5).fill({ color: 0xb3e5fc, alpha: 0.4 });
+        const wx = u.x - Math.cos(u.angle) * (def.radius + 5);
+        const wy = u.y - Math.sin(u.angle) * (def.radius + 5);
+        g.circle(wx, wy, 3.5).fill({ color: 0xb3e5fc, alpha: 0.4 });
       }
 
       // Micro Unit Status Bars (HP, Supply Warning, Garrison, Passengers)
       const showBars = selectedIds.has(u.id) || u.hp < u.maxHp || !u.supplied || u.ammo <= 1;
       if (showBars) {
-        const barY = u.y - altVisualOffset - def.radius - 9;
-        const barW = Math.max(18, def.radius * 1.7);
+        const barY = u.y - altVisualOffset - def.radius - 6;
+        const barW = Math.max(12, def.radius * 1.9);
         const hpPct = Math.max(0, u.hp / u.maxHp);
-        g.rect(u.x - barW * 0.5, barY, barW, 3).fill({ color: 0x0d1214, alpha: 0.85 });
-        g.rect(u.x - barW * 0.5, barY, barW * hpPct, 3).fill({
+        g.rect(u.x - barW * 0.5, barY, barW, 2.5).fill({ color: 0x0d1214, alpha: 0.85 });
+        g.rect(u.x - barW * 0.5, barY, barW * hpPct, 2.5).fill({
           color: u.faction === viewerFaction ? 0x66bb6a : 0xef5350,
         });
 
-        // Out-of-supply / Low-Ammo / Low-Fuel amber/red pip
-        if (u.faction === viewerFaction && (!u.supplied || u.ammo <= 0 || (u.maxFuel > 0 && u.fuel <= 5))) {
-          g.circle(u.x + barW * 0.5 + 4, barY + 1.5, 2.8).fill({
+        if (
+          u.faction === viewerFaction &&
+          (!u.supplied || u.ammo <= 0 || (u.maxFuel > 0 && u.fuel <= 5))
+        ) {
+          g.circle(u.x + barW * 0.5 + 3, barY + 1.25, 2.2).fill({
             color: u.ammo <= 0 || (u.maxFuel > 0 && u.fuel <= 1) ? 0xef5350 : 0xffb300,
           });
         }
       }
 
-      // Garrison indicator
       if (u.garrisonNodeId !== null) {
-        g.rect(u.x - 5, u.y - def.radius - 15, 10, 4).fill({ color: 0x4fc3f7 });
+        g.rect(u.x - 4, u.y - def.radius - 11, 8, 3).fill({ color: 0x4fc3f7 });
       }
 
-      // APC Passenger pips
       if (u.passengers.length > 0) {
         for (let p = 0; p < u.passengers.length; p++) {
-          g.rect(u.x - 6 + p * 6, u.y + def.radius + 4, 4, 3).fill({ color: 0xfff176 });
+          g.rect(u.x - 4 + p * 5, u.y + def.radius + 3, 3.5, 2.5).fill({ color: 0xfff176 });
         }
       }
     }
@@ -761,6 +1037,12 @@ export class WorldRenderer {
 
   private createUnitRenderItem(u: Unit): UnitRenderPoolItem {
     const root = new Container();
+    const def = UNIT_DEFS[u.type];
+    // Scale unit sprites to true 1px = 0.50m scale (Tank = ~15x9px, Infantry = ~12x12px, Ships = ~32x12px)
+    const unitScale =
+      def.domain === 'sea' ? 0.65 : def.domain === 'jet' || def.domain === 'heli' ? 0.64 : 0.56;
+    root.scale.set(unitScale);
+
     const hullTex = this.atlas.getUnitHull(u.type, u.faction);
 
     const shadow = new Sprite(hullTex);

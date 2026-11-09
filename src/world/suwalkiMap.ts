@@ -6,6 +6,7 @@ import {
   unprojectWorldToLatLon,
   type OsmAeroway,
   type OsmSectorData,
+  type OsmStreetPolyline,
 } from './osmBrowserLoader';
 
 export const WORLD_WIDTH = 3200;
@@ -41,6 +42,7 @@ export interface UrbanBuildingBlock {
   h: number;
   angle: number;
   tall: boolean;
+  levels?: number;
   kind: 'civic' | 'residential' | 'industrial' | 'warehouse' | 'hangar' | 'silo';
   polygon?: Point2D[];
   name?: string;
@@ -53,6 +55,9 @@ export class SuwalkiMap {
   readonly landcover: Uint8Array; // 0=deep_water, 1=coastal_water, 2=beach, 3=plains, 4=forest, 5=urban, 6=paved
   readonly roadMask: Uint8Array; // 0=none, 1=highway, 2=railroad, 3=both
   readonly splines: InfraSpline[] = [];
+  readonly streetPolylines: OsmStreetPolyline[] = [];
+  readonly pierPolygons: Point2D[][] = [];
+  readonly pierWays: Array<{ points: Point2D[]; width: number }> = [];
   readonly bridges: Bridge[] = [];
   readonly initialNodes: StrategicNode[] = [];
   readonly borders: Array<{ name: string; points: Point2D[] }> = [];
@@ -68,7 +73,6 @@ export class SuwalkiMap {
   readonly treePositions: Array<{ x: number; y: number; kind: number }> = [];
   readonly urbanBlocks: UrbanBuildingBlock[] = [];
   readonly isLiveOsm = true;
-  readonly tileCanvas: HTMLCanvasElement;
 
   constructor(seed = 541022) {
     this.elevations = new Float32Array(HM_COLS * HM_ROWS);
@@ -79,7 +83,6 @@ export class SuwalkiMap {
       throw new Error('Real-world OpenStreetMap sector must be loaded before creating SuwalkiMap.');
     }
 
-    this.tileCanvas = activeOsmSector.tileCanvas;
     this.setupFromLiveOsmSector(activeOsmSector, seed);
   }
 
@@ -112,7 +115,16 @@ export class SuwalkiMap {
       this.aeroways.push(aw);
     }
 
+    for (const pp of sector.pierPolygons) {
+      this.pierPolygons.push(pp);
+    }
+
+    for (const pw of sector.pierWays) {
+      this.pierWays.push(pw);
+    }
+
     for (const st of sector.cityStreets) {
+      this.streetPolylines.push(st);
       for (let i = 0; i < st.points.length - 1; i++) {
         const a = st.points[i];
         const b = st.points[i + 1];
@@ -127,27 +139,13 @@ export class SuwalkiMap {
       }
     }
 
-    // Rasterize real OSM water polygons, rivers, coastlines, piers, forests + sample real OSM tile pixels
+    // Rasterize real Overpass water polygons, rivers, coastlines, piers, forests & urban blocks
     let waterPixels: Uint8ClampedArray | null = null;
     let pierPixels: Uint8ClampedArray | null = null;
     let forestPixels: Uint8ClampedArray | null = null;
-    let osmTilePixels: Uint8ClampedArray | null = null;
+    let urbanPixels: Uint8ClampedArray | null = null;
 
     if (typeof document !== 'undefined') {
-      // Sample the stitched OpenStreetMap raster tiles at grid resolution (401x301)
-      if (sector.tileCanvas) {
-        try {
-          const tc = document.createElement('canvas');
-          tc.width = HM_COLS;
-          tc.height = HM_ROWS;
-          const tctx = tc.getContext('2d')!;
-          tctx.drawImage(sector.tileCanvas, 0, 0, HM_COLS, HM_ROWS);
-          osmTilePixels = tctx.getImageData(0, 0, HM_COLS, HM_ROWS).data;
-        } catch {
-          osmTilePixels = null;
-        }
-      }
-
       const makeLayer = (draw: (ctx: CanvasRenderingContext2D) => void) => {
         const c = document.createElement('canvas');
         c.width = HM_COLS;
@@ -199,7 +197,7 @@ export class SuwalkiMap {
 
         for (const rv of sector.riverWays) {
           if (rv.points.length < 2) continue;
-          ctx.lineWidth = Math.max(10, rv.width);
+          ctx.lineWidth = Math.max(12, rv.width);
           ctx.beginPath();
           ctx.moveTo(rv.points[0].x, rv.points[0].y);
           for (let i = 1; i < rv.points.length; i++) {
@@ -222,7 +220,7 @@ export class SuwalkiMap {
         }
         for (const pw of sector.pierWays) {
           if (pw.points.length < 2) continue;
-          ctx.lineWidth = Math.max(12, pw.width);
+          ctx.lineWidth = Math.max(14, pw.width);
           ctx.beginPath();
           ctx.moveTo(pw.points[0].x, pw.points[0].y);
           for (let i = 1; i < pw.points.length; i++) ctx.lineTo(pw.points[i].x, pw.points[i].y);
@@ -241,6 +239,25 @@ export class SuwalkiMap {
           ctx.fill();
         }
       });
+
+      urbanPixels = makeLayer((ctx) => {
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = 18;
+        for (const b of sector.buildings) {
+          if (b.polygon && b.polygon.length >= 3) {
+            ctx.beginPath();
+            ctx.moveTo(b.polygon[0].x, b.polygon[0].y);
+            for (let i = 1; i < b.polygon.length; i++) {
+              ctx.lineTo(b.polygon[i].x, b.polygon[i].y);
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+          }
+        }
+      });
     }
 
     const dem = sector.demGrid;
@@ -249,6 +266,15 @@ export class SuwalkiMap {
       minDem = Math.min(...dem.values);
     }
 
+    const isWaterCell = (col: number, row: number): boolean => {
+      if (!waterPixels) return false;
+      const cc = Math.max(0, Math.min(HM_COLS - 1, col));
+      const rr = Math.max(0, Math.min(HM_ROWS - 1, row));
+      const pIdx = (rr * HM_COLS + cc) * 4;
+      const isPier = pierPixels ? pierPixels[pIdx] > 90 : false;
+      return !isPier && waterPixels[pIdx] > 90;
+    };
+
     for (let r = 0; r < HM_ROWS; r++) {
       const wy = r * HM_STEP;
       for (let c = 0; c < HM_COLS; c++) {
@@ -256,34 +282,29 @@ export class SuwalkiMap {
         const idx = r * HM_COLS + c;
         const pIdx = idx * 4;
 
-        // Detect water & forest from both Overpass vectors AND real OpenStreetMap tile colors (#aad3df water)
-        let tileWater = false;
-        let tileForest = false;
-        if (osmTilePixels) {
-          const tr = osmTilePixels[pIdx];
-          const tg = osmTilePixels[pIdx + 1];
-          const tb = osmTilePixels[pIdx + 2];
-          // Standard OSM water (#aad3df) or Carto Voyager water (#d4ebff / #aadaff)
-          if (tb > tr + 22 && tb > tg + 6 && tb > 165) {
-            tileWater = true;
-          } else if (tg > tr + 14 && tg > tb + 12 && tg > 140) {
-            tileForest = true;
-          }
-        }
-
         const isPier = pierPixels ? pierPixels[pIdx] > 90 : false;
-        const isWater =
-          !isPier && ((waterPixels ? waterPixels[pIdx] > 90 : false) || tileWater);
-        const isForest =
-          !isWater && !isPier && ((forestPixels ? forestPixels[pIdx] > 90 : false) || tileForest);
+        const isWater = isWaterCell(c, r);
+        const isForest = !isWater && !isPier && (forestPixels ? forestPixels[pIdx] > 90 : false);
+        const isUrban = !isWater && !isPier && (urbanPixels ? urbanPixels[pIdx] > 90 : false);
 
         if (isWater) {
-          this.elevations[idx] = -6.5;
-          this.landcover[idx] = 0;
+          const allNeighborsWater =
+            isWaterCell(c - 1, r) &&
+            isWaterCell(c + 1, r) &&
+            isWaterCell(c, r - 1) &&
+            isWaterCell(c, r + 1);
+          this.elevations[idx] = allNeighborsWater ? -10.5 : -2.8;
+          this.landcover[idx] = allNeighborsWater ? 0 : 1;
         } else if (isPier) {
           this.elevations[idx] = 3.5;
           this.landcover[idx] = 6;
         } else {
+          const nearWater =
+            isWaterCell(c - 1, r) ||
+            isWaterCell(c + 1, r) ||
+            isWaterCell(c, r - 1) ||
+            isWaterCell(c, r + 1);
+
           let elev = 12 + Math.sin(wx * 0.0025) * 4 + Math.cos(wy * 0.0025) * 4;
           if (dem && dem.values.length === dem.rows * dem.cols) {
             const gx = (c / (HM_COLS - 1)) * (dem.cols - 1);
@@ -302,22 +323,12 @@ export class SuwalkiMap {
               (v00 + (v10 - v00) * fx) * (1 - fy) + (v01 + (v11 - v01) * fx) * fy;
             elev = Math.max(3, rawElev - Math.max(0, minDem - 8));
           }
-          this.elevations[idx] = elev;
-          this.landcover[idx] = isForest ? 4 : 3;
-        }
-      }
-    }
-
-    for (const b of this.urbanBlocks) {
-      const c = Math.max(0, Math.min(HM_COLS - 1, Math.round(b.x / HM_STEP)));
-      const r = Math.max(0, Math.min(HM_ROWS - 1, Math.round(b.y / HM_STEP)));
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          const nr = Math.max(0, Math.min(HM_ROWS - 1, r + dr));
-          const nc = Math.max(0, Math.min(HM_COLS - 1, c + dc));
-          const idx = nr * HM_COLS + nc;
-          if (this.elevations[idx] >= 0) {
-            this.landcover[idx] = 5;
+          if (nearWater) {
+            this.elevations[idx] = 2.0;
+            this.landcover[idx] = isUrban ? 5 : 2;
+          } else {
+            this.elevations[idx] = elev;
+            this.landcover[idx] = isUrban ? 5 : isForest ? 4 : 3;
           }
         }
       }

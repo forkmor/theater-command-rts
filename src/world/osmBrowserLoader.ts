@@ -18,9 +18,9 @@ export interface GisBoundingBox {
 }
 
 const TILE_SIZE = 256;
-// At zoom 15, 6.0 x 4.5 tiles = 1536 x 1152 native OSM tile pixels (~3.2 km x 2.4 km tactical sector)
-const SPAN_TILES_X = 6.0;
-const SPAN_TILES_Y = 4.5;
+// Real-world tactical sector ground dimensions: 1,600m x 1,200m across 3200 x 2400 pixels (1 pixel = 0.50 meters)
+export const SECTOR_WIDTH_METERS = 1600;
+export const SECTOR_HEIGHT_METERS = 1200;
 
 export function lonToMercX(lon: number, zoom: number): number {
   return ((lon + 180) / 360) * TILE_SIZE * Math.pow(2, zoom);
@@ -47,16 +47,22 @@ export function createMercatorSectorBounds(
   subtitle: string,
   centerLat: number,
   centerLon: number,
-  zoom = 15,
+  zoom = 16,
 ): GisBoundingBox {
-  const cx = lonToMercX(centerLon, zoom);
-  const cy = latToMercY(centerLat, zoom);
-  const halfW = (SPAN_TILES_X * TILE_SIZE) / 2;
-  const halfH = (SPAN_TILES_Y * TILE_SIZE) / 2;
-  const mercMinX = cx - halfW;
-  const mercMaxX = cx + halfW;
-  const mercMinY = cy - halfH;
-  const mercMaxY = cy + halfH;
+  const metersPerDegLat = 111320;
+  const metersPerDegLon = Math.max(20000, 111320 * Math.cos((centerLat * Math.PI) / 180));
+  const halfLat = SECTOR_HEIGHT_METERS / 2 / metersPerDegLat;
+  const halfLon = SECTOR_WIDTH_METERS / 2 / metersPerDegLon;
+
+  const minLat = centerLat - halfLat;
+  const maxLat = centerLat + halfLat;
+  const minLon = centerLon - halfLon;
+  const maxLon = centerLon + halfLon;
+
+  const mercMinX = lonToMercX(minLon, zoom);
+  const mercMaxX = lonToMercX(maxLon, zoom);
+  const mercMinY = latToMercY(maxLat, zoom); // north is smaller mercY
+  const mercMaxY = latToMercY(minLat, zoom); // south is larger mercY
 
   return {
     id,
@@ -65,10 +71,10 @@ export function createMercatorSectorBounds(
     centerLat,
     centerLon,
     zoom,
-    minLon: mercXToLon(mercMinX, zoom),
-    maxLon: mercXToLon(mercMaxX, zoom),
-    maxLat: mercYToLat(mercMinY, zoom), // north is smaller mercY
-    minLat: mercYToLat(mercMaxY, zoom), // south is larger mercY
+    minLon,
+    maxLon,
+    maxLat,
+    minLat,
     mercMinX,
     mercMaxX,
     mercMinY,
@@ -79,35 +85,35 @@ export function createMercatorSectorBounds(
 export const REAL_WORLD_SECTOR_PRESETS: GisBoundingBox[] = [
   createMercatorSectorBounds(
     'suwalki_city',
-    'SUWAŁKI, POLAND (54.101°N, 22.931°E)',
-    'Real OpenStreetMap Suwałki city center, PKP Rail Baltica station, Czarna Hańcza river bridges & DW655/S61 arteries',
+    'SUWAŁKI, POLAND (54.101°N, 22.935°E)',
+    'Real 1:1 scale Suwałki city blocks, Czarna Hańcza river bridges, DW655 highway & PKP Rail Baltica tracks',
     54.1012,
-    22.9308,
-    15,
+    22.9345,
+    16,
   ),
   createMercatorSectorBounds(
     'klaipeda_port',
-    'KLAIPĖDA SEAPORT, LITHUANIA (55.706°N, 21.132°E)',
-    'Real OpenStreetMap Klaipėda port piers, Curonian Spit (Smiltynė), Memel Strait, Danė River bridges & rail yards',
-    55.7065,
-    21.1325,
-    15,
+    'KLAIPĖDA SEAPORT, LITHUANIA (55.708°N, 21.132°E)',
+    'Real 1:1 scale Klaipėda harbour piers, Danė River bridges, Old Town blocks & port rail sidings',
+    55.7078,
+    21.1318,
+    16,
   ),
   createMercatorSectorBounds(
     'baltiysk_naval',
-    'BALTIYSK NAVAL BASE, KALININGRAD (54.644°N, 19.896°E)',
-    'Real OpenStreetMap Baltic Fleet naval basins, Pillau 5-point star citadel, Vistula Spit sea canal & rail terminal',
-    54.6442,
-    19.8965,
-    15,
+    'BALTIYSK NAVAL BASE, KALININGRAD (54.644°N, 19.894°E)',
+    'Real 1:1 scale Pillau 5-point star fortress, Baltic Fleet naval piers, sea canal & rail station',
+    54.6438,
+    19.8942,
+    16,
   ),
   createMercatorSectorBounds(
     'kaunas_bridges',
-    'KAUNAS NEMAN BRIDGES, LITHUANIA (54.894°N, 23.905°E)',
-    'Real OpenStreetMap Neman & Neris river confluence, Vytautas & Čiurlionis highway/rail bridges & Aleksotas airfield',
-    54.8945,
-    23.9055,
-    15,
+    'KAUNAS NEMAN BRIDGES, LITHUANIA (54.891°N, 23.914°E)',
+    'Real 1:1 scale Neman River highway & railway bridges, Nemunas Island channels & downtown Kaunas blocks',
+    54.8908,
+    23.9145,
+    16,
   ),
 ];
 
@@ -118,6 +124,7 @@ export interface OsmBuildingFootprint {
   h: number;
   angle: number;
   tall: boolean;
+  levels: number;
   kind: 'civic' | 'residential' | 'industrial' | 'warehouse' | 'hangar' | 'silo';
   polygon?: Point2D[];
   name?: string;
@@ -144,10 +151,7 @@ export interface OsmAeroway {
 
 export interface OsmSectorData {
   bounds: GisBoundingBox;
-  tileCanvas: HTMLCanvasElement;
-  topoTileCanvas?: HTMLCanvasElement;
   stats: {
-    tilesLoaded: number;
     buildings: number;
     roads: number;
     railways: number;
@@ -240,10 +244,10 @@ export async function geocodeLocationBrowser(query: string): Promise<GisBounding
     return createMercatorSectorBounds(
       `custom_${lat.toFixed(4)}_${lon.toFixed(4)}`,
       `OSM SECTOR // ${lat.toFixed(3)}°N ${lon.toFixed(3)}°E`,
-      `Real OpenStreetMap sector centered at ${lat.toFixed(4)}, ${lon.toFixed(4)}`,
+      `Real 1:1 scale OpenStreetMap sector centered at ${lat.toFixed(4)}, ${lon.toFixed(4)}`,
       lat,
       lon,
-      15,
+      16,
     );
   }
 
@@ -275,100 +279,8 @@ export async function geocodeLocationBrowser(query: string): Promise<GisBounding
     top.display_name,
     lat,
     lon,
-    15,
+    16,
   );
-}
-
-function loadTileImage(url: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    const timer = window.setTimeout(() => {
-      img.src = '';
-      reject(new Error('Tile timeout'));
-    }, 8000);
-    img.onload = () => {
-      window.clearTimeout(timer);
-      resolve(img);
-    };
-    img.onerror = () => {
-      window.clearTimeout(timer);
-      reject(new Error(`Failed tile ${url}`));
-    };
-    img.src = url;
-  });
-}
-
-async function fetchSingleOsmTile(z: number, tx: number, ty: number): Promise<HTMLImageElement> {
-  const subs = ['a', 'b', 'c'];
-  const s = subs[Math.abs(tx + ty) % subs.length];
-  const candidates = [
-    `https://tile.openstreetmap.org/${z}/${tx}/${ty}.png`,
-    `https://${s}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${tx}/${ty}.png`,
-    `https://${s}.tile.openstreetmap.fr/hot/${z}/${tx}/${ty}.png`,
-  ];
-  for (const url of candidates) {
-    try {
-      return await loadTileImage(url);
-    } catch {
-      // try next mirror
-    }
-  }
-  throw new Error(`All tile mirrors failed for ${z}/${tx}/${ty}`);
-}
-
-/**
- * Stitches the real OpenStreetMap Z15 slippy tiles covering `bounds` onto a 1600x1200 canvas.
- */
-async function fetchOsmRasterTilesCanvas(
-  bounds: GisBoundingBox,
-  canvasW: number,
-  canvasH: number,
-  onProgress?: (msg: string) => void,
-): Promise<{ canvas: HTMLCanvasElement; tilesLoaded: number }> {
-  const canvas = document.createElement('canvas');
-  canvas.width = canvasW;
-  canvas.height = canvasH;
-  const ctx = canvas.getContext('2d')!;
-
-  const z = bounds.zoom;
-  const maxTileIdx = Math.pow(2, z) - 1;
-  const txMin = Math.max(0, Math.floor(bounds.mercMinX / TILE_SIZE));
-  const txMax = Math.min(maxTileIdx, Math.floor((bounds.mercMaxX - 0.001) / TILE_SIZE));
-  const tyMin = Math.max(0, Math.floor(bounds.mercMinY / TILE_SIZE));
-  const tyMax = Math.min(maxTileIdx, Math.floor((bounds.mercMaxY - 0.001) / TILE_SIZE));
-
-  const jobs: Array<Promise<void>> = [];
-  let loaded = 0;
-  const total = (txMax - txMin + 1) * (tyMax - tyMin + 1);
-
-  const spanMercW = bounds.mercMaxX - bounds.mercMinX;
-  const spanMercH = bounds.mercMaxY - bounds.mercMinY;
-
-  for (let ty = tyMin; ty <= tyMax; ty++) {
-    for (let tx = txMin; tx <= txMax; tx++) {
-      jobs.push(
-        fetchSingleOsmTile(z, tx, ty)
-          .then((img) => {
-            const tileMercX = tx * TILE_SIZE;
-            const tileMercY = ty * TILE_SIZE;
-            const dx = ((tileMercX - bounds.mercMinX) / spanMercW) * canvasW;
-            const dy = ((tileMercY - bounds.mercMinY) / spanMercH) * canvasH;
-            const dw = (TILE_SIZE / spanMercW) * canvasW;
-            const dh = (TILE_SIZE / spanMercH) * canvasH;
-            ctx.drawImage(img, dx, dy, dw + 0.5, dh + 0.5);
-            loaded++;
-            onProgress?.(`Loaded OpenStreetMap tiles (${loaded}/${total})...`);
-          })
-          .catch(() => {
-            // tile failed
-          }),
-      );
-    }
-  }
-
-  await Promise.all(jobs);
-  return { canvas, tilesLoaded: loaded };
 }
 
 async function fetchRealDemGrid(
@@ -404,8 +316,8 @@ async function fetchRealDemGrid(
 }
 
 /**
- * Fetches both the real OpenStreetMap Z15 tile map AND live Overpass API vector geometry
- * (buildings, roads, railways, bridges, water, runways) directly in the user's browser.
+ * Fetches live 1:1 scale Overpass API vector geometry (buildings, road splines, railways,
+ * bridges, rivers, coastlines, runways) and Open-Meteo DEM elevation in the user's browser.
  */
 export async function fetchLiveOsmSector(
   bounds: GisBoundingBox,
@@ -417,26 +329,24 @@ export async function fetchLiveOsmSector(
   const cached = memoryCache.get(cacheKey);
   if (cached) {
     onProgress?.(
-      `OSM LIVE READY: ${cached.stats.tilesLoaded} OSM tiles • ${cached.stats.buildings.toLocaleString()} buildings • ${cached.stats.roads} streets`,
+      `OSM LIVE READY // ${cached.stats.buildings.toLocaleString()} BUILDINGS • ${cached.stats.roads} ROAD SPLINES • ${cached.stats.bridges} BRIDGES`,
     );
     return cached;
   }
 
-  onProgress?.(`Loading real OpenStreetMap tiles & Overpass vectors for ${bounds.title}...`);
+  onProgress?.(`Streaming real-scale Overpass GIS vectors for ${bounds.title}...`);
 
-  // 1. Start OpenStreetMap Raster Tile Stitching & DEM Elevation in parallel with Overpass API
-  const tilesPromise = fetchOsmRasterTilesCanvas(bounds, worldW / 2, worldH / 2, onProgress);
   const demPromise = fetchRealDemGrid(bounds, 8, 8);
 
-  // 2. Fast, bounding-box-clipped Overpass QL query (no unbounded relations that hang Overpass!)
   const bboxStr = `${bounds.minLat.toFixed(5)},${bounds.minLon.toFixed(5)},${bounds.maxLat.toFixed(5)},${bounds.maxLon.toFixed(5)}`;
   const query = `[out:json][timeout:14][bbox:${bboxStr}];
 (
-  way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|residential|unclassified|service)$"];
+  way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|residential|living_street|pedestrian|unclassified|service)$"];
   way["railway"~"^(rail|light_rail|narrow_gauge|tram)$"];
-  way["waterway"~"^(river|canal|dock|fairway|riverbank)$"];
+  way["waterway"~"^(river|canal|stream|dock|fairway|riverbank)$"];
   way["natural"~"^(water|coastline|bay|strait|wood)$"];
-  way["landuse"~"^(reservoir|basin|harbour|port|industrial|military|forest)$"];
+  way["landuse"~"^(reservoir|basin|harbour|port|industrial|military|forest|grass|meadow)$"];
+  way["leisure"~"^(park|garden)$"];
   way["aeroway"~"^(runway|taxiway|apron|hangar|helipad)$"];
   way["man_made"~"^(pier|breakwater|quay|bridge|storage_tank|silo)$"];
   way["building"];
@@ -450,6 +360,7 @@ out body geom(${bboxStr}) qt;`;
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
       const host = new URL(endpoint).hostname;
+      onProgress?.(`Querying Overpass GIS (${host}) for ${bounds.title}...`);
       const ctrl = new AbortController();
       const timeoutId = window.setTimeout(() => ctrl.abort(), 11000);
       const res = await fetch(endpoint, {
@@ -465,7 +376,7 @@ out body geom(${bboxStr}) qt;`;
       const data = (await res.json()) as { elements?: OverpassElement[] };
       if (data && Array.isArray(data.elements) && data.elements.length > 0) {
         elements = data.elements;
-        onProgress?.(`Streamed ${elements.length.toLocaleString()} vectors from ${host}...`);
+        onProgress?.(`Streamed ${elements.length.toLocaleString()} real GIS vectors from ${host}...`);
         break;
       }
     } catch {
@@ -473,29 +384,18 @@ out body geom(${bboxStr}) qt;`;
     }
   }
 
-  const [{ canvas: tileCanvas, tilesLoaded }, demGrid] = await Promise.all([
-    tilesPromise,
-    demPromise,
-  ]);
+  const demGrid = await demPromise;
 
-  if (tilesLoaded === 0 && elements.length === 0) {
+  if (elements.length === 0) {
     throw new Error(
-      'Browser could not reach OpenStreetMap tile servers or Overpass API. Check browser network connection.',
+      'Browser could not reach Overpass GIS endpoints. Check browser network connection.',
     );
   }
 
-  const parsed = parseOverpassElementsToSector(
-    elements,
-    bounds,
-    worldW,
-    worldH,
-    tileCanvas,
-    tilesLoaded,
-    demGrid,
-  );
+  const parsed = parseOverpassElementsToSector(elements, bounds, worldW, worldH, demGrid);
   memoryCache.set(cacheKey, parsed);
   onProgress?.(
-    `OSM LIVE READY // ${tilesLoaded} OSM Tiles • ${parsed.stats.buildings.toLocaleString()} Buildings • ${parsed.stats.roads} Streets • ${parsed.stats.bridges} Bridges`,
+    `OSM LIVE READY // ${parsed.stats.buildings.toLocaleString()} Buildings • ${parsed.stats.roads} Road Splines • ${parsed.stats.railways} Rails • ${parsed.stats.bridges} Bridges`,
   );
   return parsed;
 }
@@ -518,8 +418,6 @@ function parseOverpassElementsToSector(
   bounds: GisBoundingBox,
   worldW: number,
   worldH: number,
-  tileCanvas: HTMLCanvasElement,
-  tilesLoaded: number,
   demGrid?: { rows: number; cols: number; values: number[] },
 ): OsmSectorData {
   const splines: InfraSpline[] = [];
@@ -541,7 +439,7 @@ function parseOverpassElementsToSector(
   const militaryCenters: Array<{ name: string; x: number; y: number }> = [];
 
   const metersPerPixel = Math.max(
-    0.5,
+    0.25,
     ((bounds.maxLat - bounds.minLat) * 111320) / worldH,
   );
 
@@ -569,9 +467,9 @@ function parseOverpassElementsToSector(
     const first = pts[0];
     const last = pts[pts.length - 1];
     const isClosed =
-      pts.length >= 4 && Math.hypot(first.x - last.x, first.y - last.y) < 8;
+      pts.length >= 4 && Math.hypot(first.x - last.x, first.y - last.y) < 10;
 
-    // 1. Real Buildings, Hangars & Storage Silos
+    // 1. Real 1:1 Scale Buildings, Hangars & Storage Silos
     if (
       tags.building ||
       tags.aeroway === 'hangar' ||
@@ -579,30 +477,20 @@ function parseOverpassElementsToSector(
       tags.man_made === 'silo'
     ) {
       if (pts.length < 3) continue;
-      let minX = Infinity;
-      let maxX = -Infinity;
-      let minY = Infinity;
-      let maxY = -Infinity;
-      let cx = 0;
-      let cy = 0;
       const n = pts.length > 1 && isClosed ? pts.length - 1 : pts.length;
       const poly: Point2D[] = [];
+      let cx = 0;
+      let cy = 0;
       for (let i = 0; i < n; i++) {
         const pt = pts[i];
         poly.push(pt);
         cx += pt.x;
         cy += pt.y;
-        if (pt.x < minX) minX = pt.x;
-        if (pt.x > maxX) maxX = pt.x;
-        if (pt.y < minY) minY = pt.y;
-        if (pt.y > maxY) maxY = pt.y;
       }
       cx /= n;
       cy /= n;
-      const w = Math.max(4, maxX - minX);
-      const h = Math.max(4, maxY - minY);
-      if ((w < 3 && h < 3) || w > 550 || h > 550) continue;
 
+      // Determine principal edge angle
       let bestLen = 0;
       let angle = 0;
       for (let i = 0; i < poly.length; i++) {
@@ -615,8 +503,29 @@ function parseOverpassElementsToSector(
         }
       }
 
+      // Compute oriented bounding box dimensions along principal axis
+      const cosA = Math.cos(-angle);
+      const sinA = Math.sin(-angle);
+      let uMin = Infinity;
+      let uMax = -Infinity;
+      let vMin = Infinity;
+      let vMax = -Infinity;
+      for (const pt of poly) {
+        const dx = pt.x - cx;
+        const dy = pt.y - cy;
+        const u = dx * cosA - dy * sinA;
+        const v = dx * sinA + dy * cosA;
+        if (u < uMin) uMin = u;
+        if (u > uMax) uMax = u;
+        if (v < vMin) vMin = v;
+        if (v > vMax) vMax = v;
+      }
+      const w = Math.max(6, uMax - uMin);
+      const h = Math.max(6, vMax - vMin);
+      if ((w < 5 && h < 5) || w > 950 || h > 950) continue;
+
       const bType = tags.building || '';
-      const levels = Number(tags['building:levels'] || 0);
+      const rawLevels = Number(tags['building:levels'] || 0);
       let kind: OsmBuildingFootprint['kind'] = 'residential';
       if (tags.man_made === 'storage_tank' || tags.man_made === 'silo' || bType === 'storage_tank') {
         kind = 'silo';
@@ -635,21 +544,25 @@ function parseOverpassElementsToSector(
         bType === 'commercial' ||
         bType === 'office' ||
         bType === 'retail' ||
+        bType === 'supermarket' ||
         bType === 'university' ||
         bType === 'school' ||
-        levels >= 5
+        bType === 'apartments' ||
+        rawLevels >= 4
       ) {
         kind = 'civic';
       }
 
       const tall =
-        levels >= 4 ||
+        rawLevels >= 3 ||
         kind === 'civic' ||
         kind === 'industrial' ||
         kind === 'silo' ||
         bType === 'apartments' ||
         bType === 'church' ||
         bType === 'cathedral';
+
+      const levels = rawLevels > 0 ? rawLevels : tall ? 4 : 2;
 
       buildings.push({
         x: cx,
@@ -658,6 +571,7 @@ function parseOverpassElementsToSector(
         h,
         angle,
         tall,
+        levels,
         kind,
         polygon: poly,
         name: tags.name,
@@ -667,7 +581,7 @@ function parseOverpassElementsToSector(
 
     // 2. Real Coastlines, Water Polygons, Rivers & Canals
     if (tags.natural === 'coastline') {
-      coastlineWays.push(simplifyPolyline(pts, 3));
+      coastlineWays.push(simplifyPolyline(pts, 2.5));
       continue;
     }
 
@@ -681,7 +595,7 @@ function parseOverpassElementsToSector(
       tags.landuse === 'harbour'
     ) {
       if (pts.length >= 3) {
-        waterPolygons.push(simplifyPolyline(pts, 2.5));
+        waterPolygons.push(simplifyPolyline(pts, 2.0));
         if (tags.landuse === 'harbour' || tags.waterway === 'dock') {
           harbourCenters.push({
             name: tags.name || 'Seaport Terminal',
@@ -693,12 +607,17 @@ function parseOverpassElementsToSector(
       continue;
     }
 
-    if (tags.waterway === 'river' || tags.waterway === 'canal') {
-      const defaultMeters = tags.waterway === 'river' ? 30 : 18;
+    if (
+      tags.waterway === 'river' ||
+      tags.waterway === 'canal' ||
+      tags.waterway === 'stream'
+    ) {
+      const defaultMeters =
+        tags.waterway === 'river' ? 26 : tags.waterway === 'canal' ? 16 : 7;
       const parsedW = parseFloat(tags.width || '') || defaultMeters;
-      const pxWidth = Math.max(6, Math.min(90, parsedW / metersPerPixel));
+      const pxWidth = Math.max(10, Math.min(140, parsedW / metersPerPixel));
       riverWays.push({
-        points: simplifyPolyline(pts, 3),
+        points: simplifyPolyline(pts, 2.5),
         width: pxWidth,
         name: tags.name,
       });
@@ -715,7 +634,7 @@ function parseOverpassElementsToSector(
       if (isClosed && pts.length >= 4) {
         pierPolygons.push(simplifyPolyline(pts, 2));
       } else {
-        pierWays.push({ points: simplifyPolyline(pts, 2), width: 12 });
+        pierWays.push({ points: simplifyPolyline(pts, 2), width: 18 });
       }
       harbourCenters.push({
         name: tags.name || 'Port Pier',
@@ -725,10 +644,15 @@ function parseOverpassElementsToSector(
       continue;
     }
 
-    // 4. Real Forests & Landuse Zones
-    if (tags.natural === 'wood' || tags.landuse === 'forest') {
+    // 4. Real Forests, Parks & Landuse Zones
+    if (
+      tags.natural === 'wood' ||
+      tags.landuse === 'forest' ||
+      tags.leisure === 'park' ||
+      tags.leisure === 'garden'
+    ) {
       if (pts.length >= 3) {
-        forestPolygons.push(simplifyPolyline(pts, 4));
+        forestPolygons.push(simplifyPolyline(pts, 3));
       }
       continue;
     }
@@ -754,24 +678,24 @@ function parseOverpassElementsToSector(
     ) {
       const kind = tags.aeroway as OsmAeroway['kind'];
       const widthPx =
-        kind === 'runway' ? 26 : kind === 'apron' ? 34 : kind === 'taxiway' ? 12 : 18;
+        kind === 'runway' ? 44 : kind === 'apron' ? 52 : kind === 'taxiway' ? 20 : 26;
       aeroways.push({
-        points: simplifyPolyline(pts, 3),
+        points: simplifyPolyline(pts, 2.5),
         kind,
         width: widthPx,
       });
       continue;
     }
 
-    // 6. Real Railways
+    // 6. Real Railways (1:1 scale tracks & rail bridges)
     if (tags.railway && /^(rail|light_rail|narrow_gauge|tram)$/.test(tags.railway)) {
       let totalLen = 0;
       for (let i = 0; i < pts.length - 1; i++) {
         totalLen += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
       }
-      if (tags.service && totalLen < 120) continue;
+      if (tags.service && totalLen < 45) continue;
 
-      const simp = simplifyPolyline(pts, 6);
+      const simp = simplifyPolyline(pts, 3.0);
       const splineId = `osm_rail_${el.id}`;
       splines.push({
         id: splineId,
@@ -781,14 +705,14 @@ function parseOverpassElementsToSector(
         damagedSegments: new Set(),
       });
 
-      if (tags.bridge && tags.bridge !== 'no' && totalLen >= 16) {
+      if (tags.bridge && tags.bridge !== 'no' && totalLen >= 18) {
         const midIdx = Math.floor((simp.length - 1) / 2);
         const a = simp[midIdx];
         const b = simp[Math.min(simp.length - 1, midIdx + 1)];
         const midX = (a.x + b.x) * 0.5;
         const midY = (a.y + b.y) * 0.5;
         if (
-          !bridges.some((br) => Math.hypot(br.x - midX, br.y - midY) < 42) &&
+          !bridges.some((br) => Math.hypot(br.x - midX, br.y - midY) < 40) &&
           midX > 40 &&
           midX < worldW - 40 &&
           midY > 40 &&
@@ -801,7 +725,7 @@ function parseOverpassElementsToSector(
             x: midX,
             y: midY,
             angle: Math.atan2(b.y - a.y, b.x - a.x),
-            length: Math.max(44, Math.min(130, totalLen)),
+            length: Math.max(48, Math.min(180, totalLen)),
             hp: 750,
             maxHp: 750,
             destroyed: false,
@@ -813,14 +737,14 @@ function parseOverpassElementsToSector(
       continue;
     }
 
-    // 7. Real Highways & City Streets
+    // 7. Real Highways & City Street Splines (1:1 scale widths at 1px = 0.5m)
     if (tags.highway) {
       const hClass = tags.highway;
       const isMajor =
-        /^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary)$/.test(
+        /^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link)$/.test(
           hClass,
         );
-      const simp = simplifyPolyline(pts, isMajor ? 5 : 4);
+      const simp = simplifyPolyline(pts, 2.0);
       let totalLen = 0;
       for (let i = 0; i < simp.length - 1; i++) {
         totalLen += Math.hypot(simp[i + 1].x - simp[i].x, simp[i + 1].y - simp[i].y);
@@ -828,14 +752,16 @@ function parseOverpassElementsToSector(
 
       const widthPx =
         hClass.startsWith('motorway') || hClass.startsWith('trunk')
-          ? 13
+          ? 24
           : hClass.startsWith('primary')
-            ? 11
+            ? 20
             : hClass.startsWith('secondary')
-              ? 9
+              ? 17
               : hClass.startsWith('tertiary')
-                ? 7
-                : 5;
+                ? 14
+                : hClass === 'residential' || hClass === 'living_street' || hClass === 'unclassified'
+                  ? 11
+                  : 7;
 
       cityStreets.push({
         points: simp,
@@ -844,7 +770,7 @@ function parseOverpassElementsToSector(
         name: tags.name || tags.ref,
       });
 
-      if (isMajor && totalLen >= 40) {
+      if (isMajor && totalLen >= 25) {
         const splineId = `osm_hwy_${el.id}`;
         splines.push({
           id: splineId,
@@ -853,35 +779,36 @@ function parseOverpassElementsToSector(
           points: simp,
           damagedSegments: new Set(),
         });
+      }
 
-        if (tags.bridge && tags.bridge !== 'no' && totalLen >= 16) {
-          const midIdx = Math.floor((simp.length - 1) / 2);
-          const a = simp[midIdx];
-          const b = simp[Math.min(simp.length - 1, midIdx + 1)];
-          const midX = (a.x + b.x) * 0.5;
-          const midY = (a.y + b.y) * 0.5;
-          if (
-            !bridges.some((br) => Math.hypot(br.x - midX, br.y - midY) < 42) &&
-            midX > 40 &&
-            midX < worldW - 40 &&
-            midY > 40 &&
-            midY < worldH - 40
-          ) {
-            bridges.push({
-              id: `br_hwy_${el.id}`,
-              name: tags.name || tags.ref || 'Road Bridge',
-              kind: 'highway',
-              x: midX,
-              y: midY,
-              angle: Math.atan2(b.y - a.y, b.x - a.x),
-              length: Math.max(44, Math.min(130, totalLen)),
-              hp: 750,
-              maxHp: 750,
-              destroyed: false,
-              splineId,
-              segmentIndex: midIdx,
-            });
-          }
+      if (tags.bridge && tags.bridge !== 'no' && totalLen >= 18) {
+        const splineId = `osm_hwy_${el.id}`;
+        const midIdx = Math.floor((simp.length - 1) / 2);
+        const a = simp[midIdx];
+        const b = simp[Math.min(simp.length - 1, midIdx + 1)];
+        const midX = (a.x + b.x) * 0.5;
+        const midY = (a.y + b.y) * 0.5;
+        if (
+          !bridges.some((br) => Math.hypot(br.x - midX, br.y - midY) < 40) &&
+          midX > 40 &&
+          midX < worldW - 40 &&
+          midY > 40 &&
+          midY < worldH - 40
+        ) {
+          bridges.push({
+            id: `br_hwy_${el.id}`,
+            name: tags.name || tags.ref || 'Road Bridge',
+            kind: 'highway',
+            x: midX,
+            y: midY,
+            angle: Math.atan2(b.y - a.y, b.x - a.x),
+            length: Math.max(48, Math.min(180, totalLen)),
+            hp: 750,
+            maxHp: 750,
+            destroyed: false,
+            splineId,
+            segmentIndex: midIdx,
+          });
         }
       }
     }
@@ -904,9 +831,7 @@ function parseOverpassElementsToSector(
 
   return {
     bounds,
-    tileCanvas,
     stats: {
-      tilesLoaded,
       buildings: buildings.length,
       roads: cityStreets.length,
       railways: splines.filter((s) => s.kind === 'railroad').length,
