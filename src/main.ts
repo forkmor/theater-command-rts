@@ -19,71 +19,37 @@ import {
   WORLD_WIDTH,
 } from './world/suwalkiMap';
 
-function drawGlobalTheaterMap(bluePct: number): void {
+let latestBluePct = 50;
+
+function updateTheaterPreviewCanvas(bluePct = latestBluePct): void {
+  latestBluePct = bluePct;
   const canvas = document.getElementById('global-map-canvas') as HTMLCanvasElement | null;
   if (!canvas) return;
   const ctx = canvas.getContext('2d')!;
   const w = canvas.width;
   const h = canvas.height;
-  ctx.imageSmoothingEnabled = false;
 
-  // Deep ocean background
-  ctx.fillStyle = '#0c1821';
-  ctx.fillRect(0, 0, w, h);
+  const osmSector = getActiveOsmSector();
+  if (osmSector) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(osmSector.tileCanvas, 0, 0, w, h);
 
-  // Subtle lat/lon graticule
-  ctx.strokeStyle = 'rgba(79, 124, 153, 0.16)';
-  ctx.lineWidth = 1;
-  for (let x = 38; x < w; x += 38) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h);
-    ctx.stroke();
-  }
-  for (let y = 30; y < h; y += 30) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y);
-    ctx.stroke();
-  }
-
-  // Stylized pixel-art world continents [x, y, w, h] blocks
-  const continents = [
-    [32, 18, 62, 24],
-    [52, 42, 28, 14],
-    [82, 60, 32, 40],
-    [168, 16, 48, 24],
-    [182, 10, 24, 10],
-    [166, 44, 52, 46],
-    [216, 14, 122, 32],
-    [218, 46, 88, 26],
-    [304, 84, 38, 22],
-  ];
-
-  ctx.fillStyle = '#25383c';
-  for (const [cx, cy, cw, ch] of continents) {
-    ctx.fillRect(cx, cy, cw, ch);
-    ctx.fillStyle = '#31494d';
-    ctx.fillRect(cx + 2, cy + 2, cw - 4, ch - 4);
-    ctx.fillStyle = '#25383c';
-  }
-
-  const hotspots = [
-    { x: 196, y: 26, label: 'SUWALKI / BALTIC [OSM LIVE]', active: true, alignLeft: false },
-    { x: 304, y: 56, label: 'GLOBAL OSM SEARCH', active: false, alignLeft: true },
-  ];
-
-  for (const hs of hotspots) {
-    ctx.strokeStyle = hs.active ? '#f5c242' : '#607d8b';
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(hs.x - 5, hs.y - 5, 10, 10);
-    ctx.fillStyle = hs.active ? '#f5c242' : '#78909c';
-    ctx.fillRect(hs.x - 2, hs.y - 2, 4, 4);
-
-    ctx.font = 'bold 9px monospace';
-    ctx.fillStyle = hs.active ? '#f5c242' : '#90a4ae';
-    const textX = hs.alignLeft ? hs.x - 102 : hs.x + 8;
-    ctx.fillText(hs.label, textX, hs.y + 3);
+    // Top bar overlay showing live OpenStreetMap sector title & coordinates
+    ctx.fillStyle = 'rgba(9, 16, 22, 0.78)';
+    ctx.fillRect(0, 0, w, 20);
+    ctx.font = 'bold 10px monospace';
+    ctx.fillStyle = '#66bb6a';
+    ctx.fillText(
+      `OSM LIVE: ${osmSector.bounds.title} (${osmSector.bounds.centerLat.toFixed(3)}°N, ${osmSector.bounds.centerLon.toFixed(3)}°E)`,
+      6,
+      13,
+    );
+  } else {
+    ctx.fillStyle = '#0c1821';
+    ctx.fillRect(0, 0, w, h);
+    ctx.font = 'bold 11px monospace';
+    ctx.fillStyle = '#4fc3f7';
+    ctx.fillText('STREAMING REAL OPENSTREETMAP TILES & OVERPASS GIS...', 14, h * 0.5);
   }
 
   const redPct = 100 - bluePct;
@@ -96,7 +62,7 @@ function drawGlobalTheaterMap(bluePct: number): void {
 }
 
 async function bootstrap(): Promise<void> {
-  drawGlobalTheaterMap(50);
+  updateTheaterPreviewCanvas(50);
 
   const container = document.getElementById('pixi-canvas-container')!;
   const app = new Application();
@@ -112,6 +78,7 @@ async function bootstrap(): Promise<void> {
   const mpClient = new MultiplayerClient();
 
   let activeSim: GameSimulation | null = null;
+  let previewSim: GameSimulation | null = null;
   let aiCommander: AICommander | null = null;
   let isMultiplayerMatch = false;
   let localFaction: PlayableFaction = 'blue';
@@ -139,18 +106,18 @@ async function bootstrap(): Promise<void> {
     hud.detachMatch();
     gameoverModal.classList.add('hidden');
     lobbyOverlay.classList.remove('hidden');
+    if (previewSim) {
+      renderer.bindSimulation(previewSim, 'blue');
+      renderer.camX = WORLD_WIDTH * 0.5;
+      renderer.camY = WORLD_HEIGHT * 0.5;
+      renderer.zoom = 0.88;
+    }
   };
 
   const hud = new HudController(renderer, dispatchCommand, exitToLobby);
 
-  // Live background preview battle behind the Lobby
-  let previewSim = new GameSimulation(541022, 'mech_blitz', 'air_cav');
   const previewAiBlue = new AICommander('blue', 'tactical');
   const previewAiRed = new AICommander('red', 'tactical');
-  renderer.bindSimulation(previewSim, 'blue');
-  renderer.camX = WORLD_WIDTH * 0.5;
-  renderer.camY = WORLD_HEIGHT * 0.5;
-  renderer.zoom = 0.85;
 
   let activeOsmPromise: Promise<void> | null = null;
 
@@ -162,9 +129,10 @@ async function bootstrap(): Promise<void> {
         }
         const data = await fetchLiveOsmSector(bounds, WORLD_WIDTH, WORLD_HEIGHT, (msg) => {
           if (elOsmStatus) elOsmStatus.textContent = msg;
-          if (elNetStatus) elNetStatus.textContent = 'STREAMING OVERPASS GIS...';
+          if (elNetStatus) elNetStatus.textContent = 'STREAMING OPENSTREETMAP...';
         });
         setActiveOsmSector(data);
+        updateTheaterPreviewCanvas();
         if (elOsmStatus) {
           elOsmStatus.className = 'osm-live-status ok';
           elOsmStatus.textContent = `OSM LIVE READY // ${data.stats.buildings.toLocaleString()} BUILDINGS • ${data.stats.roads} ROADS • ${data.stats.railways} RAILS • ${data.stats.bridges} BRIDGES`;
@@ -173,7 +141,7 @@ async function bootstrap(): Promise<void> {
           elNetStatus.textContent = `OSM LIVE: ${data.stats.buildings.toLocaleString()} BLDGS`;
         }
 
-        // Rebuild preview simulation with the newly streamed real OpenStreetMap sector!
+        // Build live preview simulation exclusively from real OpenStreetMap GIS data
         previewSim = new GameSimulation(541022, 'mech_blitz', 'air_cav');
         if (!activeSim) {
           renderer.bindSimulation(previewSim, 'blue');
@@ -185,7 +153,7 @@ async function bootstrap(): Promise<void> {
         const msg = err instanceof Error ? err.message : String(err);
         if (elOsmStatus) {
           elOsmStatus.className = 'osm-live-status warn';
-          elOsmStatus.textContent = `OVERPASS STREAM WARNING: ${msg} (Using Regional GIS Fallback)`;
+          elOsmStatus.textContent = `OPENSTREETMAP STREAM ERROR: ${msg}`;
         }
       }
     })();
@@ -242,7 +210,7 @@ async function bootstrap(): Promise<void> {
     }
   });
 
-  // Automatically stream the default real-world sector (Suwalki City & Rail Baltica) in the user's browser on load!
+  // Stream the default real-world sector (Suwalki City & Rail Baltica) in the user's browser on load
   void loadBrowserOsmSector(REAL_WORLD_SECTOR_PRESETS[0]);
 
   function startSession(opts: {
@@ -314,19 +282,17 @@ async function bootstrap(): Promise<void> {
     });
   });
 
-  // Launch AI Skirmish (awaits active browser OSM stream if currently downloading)
+  // Launch AI Skirmish (strictly requires live OpenStreetMap sector)
   const btnStartSkirmish = document.getElementById('btn-start-skirmish') as HTMLButtonElement;
   btnStartSkirmish.addEventListener('click', async () => {
     if (activeOsmPromise && !getActiveOsmSector()) {
       btnStartSkirmish.textContent = 'STREAMING LIVE OPENSTREETMAP...';
       btnStartSkirmish.disabled = true;
-      await Promise.race([
-        activeOsmPromise,
-        new Promise((r) => window.setTimeout(r, 7000)),
-      ]);
+      await activeOsmPromise;
       btnStartSkirmish.textContent = 'LAUNCH AI SKIRMISH';
       btnStartSkirmish.disabled = false;
     }
+    if (!getActiveOsmSector()) return;
 
     const diffSelect = document.getElementById('select-ai-difficulty') as HTMLSelectElement;
     const diff = (diffSelect.value as AIDifficulty) || 'tactical';
@@ -354,7 +320,7 @@ async function bootstrap(): Promise<void> {
   };
 
   mpClient.onGlobalWarUpdate = (bluePct) => {
-    drawGlobalTheaterMap(bluePct);
+    updateTheaterPreviewCanvas(bluePct);
   };
 
   mpClient.onRoomCreated = (code, faction) => {
@@ -437,8 +403,8 @@ async function bootstrap(): Promise<void> {
           : `Enemy forces overran your operational HQ.`;
         gameoverModal.classList.remove('hidden');
       }
-    } else {
-      // Animate background AI clash behind Command Lobby!
+    } else if (previewSim) {
+      // Animate background AI clash on the live OpenStreetMap sector behind Command Lobby
       while (accumulator >= FIXED_DT) {
         previewSim.step(FIXED_DT);
         previewAiBlue.update(previewSim, FIXED_DT);

@@ -90,7 +90,7 @@ export class WorldRenderer {
     this.nodePool.clear();
     this.trainPool.clear();
 
-    // Bake crisp 2px pixel-art terrain & infrastructure map
+    // Bake real OpenStreetMap Z15 tile map + Overpass GIS vector infrastructure
     const { terrainTex, topoTex } = this.bakeTerrainTextures(sim.map);
     this.terrainSprite = new Sprite(terrainTex);
     this.terrainSprite.scale.set(2);
@@ -98,15 +98,6 @@ export class WorldRenderer {
     this.topoSprite = new Sprite(topoTex);
     this.topoSprite.scale.set(2);
     this.topoSprite.visible = this.showTopoOverlay;
-
-    // Populate pixel forest canopy
-    for (const tr of sim.map.treePositions) {
-      const sp = new Sprite(this.atlas.treeTextures[tr.kind % this.atlas.treeTextures.length]);
-      sp.anchor.set(0.5);
-      sp.x = Math.round(tr.x);
-      sp.y = Math.round(tr.y);
-      this.treeContainer.addChild(sp);
-    }
 
     // Fog of War overlay sprite
     const fogTex = new Texture({ source: this.fogSource });
@@ -127,7 +118,7 @@ export class WorldRenderer {
       this.fogSprite,
     );
 
-    // Center camera on player's starting HQ (Suwałki 54.10°N 22.93°E or Gusev 54.59°N 22.20°E)
+    // Center camera on player's starting HQ
     const myHq = sim.nodes.find((n) => n.type === 'hq' && n.faction === viewerFaction);
     if (myHq) {
       this.camX = myHq.x;
@@ -144,8 +135,11 @@ export class WorldRenderer {
     canvas.width = bw;
     canvas.height = bh;
     const ctx = canvas.getContext('2d')!;
-    ctx.imageSmoothingEnabled = false;
-    const img = ctx.createImageData(bw, bh);
+    ctx.imageSmoothingEnabled = true;
+
+    // 1. Draw the real stitched OpenStreetMap Z15 tiles directly onto the terrain canvas
+    ctx.drawImage(map.tileCanvas, 0, 0, bw, bh);
+    const img = ctx.getImageData(0, 0, bw, bh);
     const data = img.data;
 
     const topoCanvas = document.createElement('canvas');
@@ -155,83 +149,32 @@ export class WorldRenderer {
     const topoImg = topoCtx.createImageData(bw, bh);
     const topoData = topoImg.data;
 
+    // 2. Apply subtle DEM hillshading from Open-Meteo elevation + build Topographic Contour overlay
     for (let py = 0; py < bh; py++) {
       const wy = py * 2;
       for (let px = 0; px < bw; px++) {
         const wx = px * 2;
         const elev = map.getElevation(wx, wy);
-        const lc = map.getLandcover(wx, wy);
-
-        // Directional NW Sun Hillshading
         const eNW = map.getElevation(wx - 6, wy - 6);
-        const shade = Math.max(-22, Math.min(24, (elev - eNW) * 3.8));
-        // Subtle pixel dither
-        const dither = ((px + py) & 1) === 0 ? 3 : -2;
-
-        let r = 56;
-        let g = 74;
-        let b = 49;
-
-        if (elev < -12) {
-          r = 16;
-          g = 38;
-          b = 54;
-        } else if (elev < -3) {
-          r = 23;
-          g = 54;
-          b = 73;
-        } else if (elev < 0) {
-          r = 34;
-          g = 76;
-          b = 96;
-        } else if (elev < 2.6) {
-          // Sandy shoreline / riverbank
-          r = 132;
-          g = 123;
-          b = 92;
-        } else if (lc === 'urban' || lc === 'paved') {
-          r = 66;
-          g = 73;
-          b = 76;
-        } else if (lc === 'forest') {
-          r = 42;
-          g = 62;
-          b = 41;
-        } else if (elev > 85) {
-          // High Moraine Ridge crests
-          r = 112;
-          g = 114;
-          b = 86;
-        } else if (elev > 52) {
-          r = 84;
-          g = 98;
-          b = 65;
-        } else if (elev > 28) {
-          r = 66;
-          g = 86;
-          b = 54;
-        }
+        const shade = Math.max(-14, Math.min(16, (elev - eNW) * 2.5));
 
         const idx = (py * bw + px) * 4;
-        data[idx] = Math.max(0, Math.min(255, r + shade + dither));
-        data[idx + 1] = Math.max(0, Math.min(255, g + shade + dither));
-        data[idx + 2] = Math.max(0, Math.min(255, b + (elev < 0 ? dither : shade * 0.7)));
+        // Preserve authentic OpenStreetMap colors & text labels with slight tactical contrast + DEM hillshade
+        data[idx] = Math.max(0, Math.min(255, Math.round(data[idx] * 0.88 + shade)));
+        data[idx + 1] = Math.max(0, Math.min(255, Math.round(data[idx + 1] * 0.88 + shade)));
+        data[idx + 2] = Math.max(0, Math.min(255, Math.round(data[idx + 2] * 0.9 + shade * 0.6)));
         data[idx + 3] = 255;
 
-        // Topographic Contour Check (every 18m above sea level)
+        // Topographic Contour Check (every 15m above sea level for TOPO overlay)
         if (elev > 2) {
-          const band = Math.floor(elev / 18);
-          const bandR = Math.floor(map.getElevation(wx + 2, wy) / 18);
-          const bandD = Math.floor(map.getElevation(wx, wy + 2) / 18);
+          const band = Math.floor(elev / 15);
+          const bandR = Math.floor(map.getElevation(wx + 2, wy) / 15);
+          const bandD = Math.floor(map.getElevation(wx, wy + 2) / 15);
           if (band !== bandR || band !== bandD) {
-            // Subtle contour baked into base + crisp contour in topo layer
-            data[idx] = Math.min(255, data[idx] + 14);
-            data[idx + 1] = Math.min(255, data[idx + 1] + 14);
-
             topoData[idx] = 245;
             topoData[idx + 1] = 194;
             topoData[idx + 2] = 66;
-            topoData[idx + 3] = band % 2 === 0 ? 185 : 105;
+            topoData[idx + 3] = band % 2 === 0 ? 195 : 115;
           }
         }
       }
@@ -240,63 +183,14 @@ export class WorldRenderer {
     ctx.putImageData(img, 0, 0);
     topoCtx.putImageData(topoImg, 0, 0);
 
-    // Draw Real International Borders (PL / LT / RU-Kaliningrad / BY-Grodno)
-    for (const border of map.borders) {
-      ctx.save();
-      ctx.strokeStyle = 'rgba(239, 83, 80, 0.52)';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 4]);
-      ctx.beginPath();
-      border.points.forEach((p, idx) => {
-        if (idx === 0) ctx.moveTo(p.x / 2, p.y / 2);
-        else ctx.lineTo(p.x / 2, p.y / 2);
-      });
-      ctx.stroke();
-      ctx.restore();
-
-      topoCtx.save();
-      topoCtx.strokeStyle = 'rgba(255, 112, 67, 0.9)';
-      topoCtx.lineWidth = 2;
-      topoCtx.setLineDash([6, 4]);
-      topoCtx.beginPath();
-      border.points.forEach((p, idx) => {
-        if (idx === 0) topoCtx.moveTo(p.x / 2, p.y / 2);
-        else topoCtx.lineTo(p.x / 2, p.y / 2);
-      });
-      topoCtx.stroke();
-      topoCtx.restore();
-    }
-
-    // Draw Local & Secondary City Streets (respecting real OSM road widths & classes)
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    for (const st of map.cityStreets) {
-      const w = (st.width ?? 4.5) * 0.5;
-      ctx.strokeStyle = '#22272a';
-      ctx.lineWidth = w + 1.2;
-      ctx.beginPath();
-      ctx.moveTo(st.x1 / 2, st.y1 / 2);
-      ctx.lineTo(st.x2 / 2, st.y2 / 2);
-      ctx.stroke();
-
-      ctx.strokeStyle =
-        st.highwayClass && /^(motorway|trunk|primary)/.test(st.highwayClass)
-          ? '#3d464c'
-          : '#32393d';
-      ctx.lineWidth = w;
-      ctx.stroke();
-    }
-
-    // Draw Real Spline Highways & Railroads onto pixel terrain canvas
+    // 3. Highlight Real Overpass Spline Highways & Railroads (aligned in Web Mercator EPSG:3857)
     for (const sp of map.splines) {
       if (sp.kind === 'highway') {
-        const roadW = map.isLiveOsm ? 5.2 : 7.5;
-        const innerW = map.isLiveOsm ? 3.8 : 5.5;
-        // Asphalt roadbed
-        ctx.strokeStyle = '#23282b';
-        ctx.lineWidth = roadW;
+        ctx.save();
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
+        ctx.strokeStyle = 'rgba(245, 194, 66, 0.45)';
+        ctx.lineWidth = 3.2;
         ctx.beginPath();
         sp.points.forEach((p, idx) => {
           if (idx === 0) ctx.moveTo(p.x / 2, p.y / 2);
@@ -304,21 +198,16 @@ export class WorldRenderer {
         });
         ctx.stroke();
 
-        // Highway shoulder + dashed centerline
-        ctx.strokeStyle = '#3c454a';
-        ctx.lineWidth = innerW;
-        ctx.stroke();
-
-        ctx.save();
-        ctx.strokeStyle = '#d4b44a';
-        ctx.lineWidth = 0.9;
-        ctx.setLineDash([3, 4]);
+        ctx.strokeStyle = 'rgba(255, 235, 130, 0.75)';
+        ctx.lineWidth = 1.0;
+        ctx.setLineDash([4, 5]);
         ctx.stroke();
         ctx.restore();
       } else {
-        // Railroad gravel ballast
-        ctx.strokeStyle = '#473f36';
-        ctx.lineWidth = map.isLiveOsm ? 4.5 : 5.5;
+        // Real Overpass Railway Tracks (wooden sleepers + steel rails)
+        ctx.save();
+        ctx.strokeStyle = 'rgba(71, 63, 54, 0.78)';
+        ctx.lineWidth = 4.0;
         ctx.beginPath();
         sp.points.forEach((p, idx) => {
           if (idx === 0) ctx.moveTo(p.x / 2, p.y / 2);
@@ -326,28 +215,26 @@ export class WorldRenderer {
         });
         ctx.stroke();
 
-        // Wooden sleepers / ties
-        ctx.save();
-        ctx.strokeStyle = '#26201b';
-        ctx.lineWidth = map.isLiveOsm ? 3.6 : 4.5;
+        ctx.strokeStyle = 'rgba(38, 32, 27, 0.88)';
+        ctx.lineWidth = 3.2;
         ctx.setLineDash([2, 3]);
         ctx.stroke();
-        ctx.restore();
+        ctx.setLineDash([]);
 
-        // Steel rail tracks
-        ctx.strokeStyle = '#9eaeb5';
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = 'rgba(190, 208, 216, 0.88)';
+        ctx.lineWidth = 1.3;
         ctx.stroke();
+        ctx.restore();
       }
     }
 
-    // Draw Real OSM Aeroways (Runways, Taxiways, Aprons) if present
+    // 4. Draw Real OSM Aeroways (Runways, Taxiways, Aprons) if present
     for (const aw of map.aeroways) {
       if (aw.points.length < 2) continue;
       ctx.save();
       ctx.lineCap = 'butt';
       ctx.lineJoin = 'round';
-      ctx.strokeStyle = '#23292c';
+      ctx.strokeStyle = 'rgba(35, 41, 44, 0.85)';
       ctx.lineWidth = aw.width * 0.5 + 2;
       ctx.beginPath();
       aw.points.forEach((p, idx) => {
@@ -356,7 +243,7 @@ export class WorldRenderer {
       });
       ctx.stroke();
 
-      ctx.strokeStyle = '#384146';
+      ctx.strokeStyle = 'rgba(56, 65, 70, 0.88)';
       ctx.lineWidth = aw.width * 0.5;
       ctx.stroke();
 
@@ -369,51 +256,27 @@ export class WorldRenderer {
       ctx.restore();
     }
 
-    // Draw Airfield Paved Runways onto terrain for fallback/strategic nodes
-    for (const nd of map.initialNodes) {
-      if (nd.type === 'airfield' && map.aeroways.length === 0) {
-        const ang = nd.runwayAngle ?? 0;
-        ctx.save();
-        ctx.translate(nd.x / 2, (nd.y + 36) / 2);
-        ctx.rotate(ang);
-        ctx.fillStyle = '#23292c';
-        ctx.fillRect(-72, -11, 144, 22);
-        ctx.fillStyle = '#343c40';
-        ctx.fillRect(-70, -9, 140, 18);
-        ctx.fillStyle = '#eceff1';
-        for (let ry = -7; ry <= 5; ry += 4) {
-          ctx.fillRect(-66, ry, 8, 2);
-          ctx.fillRect(58, ry, 8, 2);
-        }
-        for (let rx = -48; rx <= 44; rx += 14) {
-          ctx.fillRect(rx, -1, 7, 2);
-        }
-        ctx.restore();
-      }
-    }
-
-    // Draw Real Building Footprints (Exact OpenStreetMap Polygons or Oriented Footprints)
+    // 5. Draw Real Overpass Building Polygons (3D Roof Shadow + Tactical Footprint Outline)
     for (const b of map.urbanBlocks) {
-      let roofOuter = '#5c443a';
-      let roofInner = '#8c6757'; // European terracotta residential roof
+      let roofOuter = 'rgba(92, 68, 58, 0.88)';
+      let roofInner = 'rgba(158, 108, 88, 0.68)'; // European terracotta roof
       if (b.kind === 'civic' || b.tall) {
-        roofOuter = '#41525c';
-        roofInner = '#657c8a';
+        roofOuter = 'rgba(65, 82, 92, 0.9)';
+        roofInner = 'rgba(101, 124, 138, 0.72)';
       } else if (b.kind === 'industrial' || b.kind === 'warehouse') {
-        roofOuter = '#3f464a';
-        roofInner = '#5f686e';
+        roofOuter = 'rgba(63, 70, 74, 0.9)';
+        roofInner = 'rgba(95, 104, 110, 0.72)';
       } else if (b.kind === 'hangar') {
-        roofOuter = '#364538';
-        roofInner = '#4e6150';
+        roofOuter = 'rgba(54, 69, 56, 0.9)';
+        roofInner = 'rgba(78, 97, 80, 0.72)';
       } else if (b.kind === 'silo') {
-        roofOuter = '#90a4ae';
-        roofInner = '#cfd8dc';
+        roofOuter = 'rgba(144, 164, 174, 0.9)';
+        roofInner = 'rgba(207, 216, 220, 0.78)';
       }
 
-      if (b.polygon && b.polygon.length >= 3 && b.kind !== 'silo') {
-        const shadowOffset = b.tall ? 2.2 : 1.3;
-        // 1. 3D Building Drop Shadow using exact OSM polygon
-        ctx.fillStyle = 'rgba(0,0,0,0.46)';
+      if (b.polygon && b.polygon.length >= 3) {
+        const shadowOffset = b.tall ? 2.0 : 1.2;
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
         ctx.beginPath();
         ctx.moveTo(b.polygon[0].x / 2 + shadowOffset, b.polygon[0].y / 2 + shadowOffset);
         for (let i = 1; i < b.polygon.length; i++) {
@@ -422,10 +285,9 @@ export class WorldRenderer {
         ctx.closePath();
         ctx.fill();
 
-        // 2. Exact OSM Building Footprint Fill & Roof Eaves Outline
         ctx.fillStyle = roofInner;
         ctx.strokeStyle = roofOuter;
-        ctx.lineWidth = 1.0;
+        ctx.lineWidth = 0.85;
         ctx.beginPath();
         ctx.moveTo(b.polygon[0].x / 2, b.polygon[0].y / 2);
         for (let i = 1; i < b.polygon.length; i++) {
@@ -434,51 +296,17 @@ export class WorldRenderer {
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
-        continue;
       }
-
-      ctx.save();
-      ctx.translate(b.x / 2, b.y / 2);
-      ctx.rotate(b.angle);
-      const hw = b.w / 4;
-      const hh = b.h / 4;
-
-      if (b.kind === 'silo') {
-        ctx.fillStyle = 'rgba(0,0,0,0.42)';
-        ctx.beginPath();
-        ctx.arc(1.5, 1.5, Math.max(2.5, hw * 0.85), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#cfd8dc';
-        ctx.beginPath();
-        ctx.arc(0, 0, Math.max(2.5, hw * 0.85), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#eceff1';
-        ctx.fillRect(-hw * 0.5, -1, hw, 2);
-      } else {
-        ctx.fillStyle = 'rgba(0,0,0,0.42)';
-        ctx.fillRect(-hw + 1.5, -hh + 1.5, hw * 2, hh * 2);
-
-        ctx.fillStyle = roofOuter;
-        ctx.fillRect(-hw, -hh, hw * 2, hh * 2);
-        ctx.fillStyle = roofInner;
-        ctx.fillRect(-hw + 1, -hh + 1, hw * 2 - 2, hh * 2 - 2);
-
-        if (b.tall || b.kind === 'warehouse' || b.kind === 'industrial') {
-          ctx.fillStyle = '#333b40';
-          ctx.fillRect(-hw * 0.5, -hh * 0.3, hw, Math.max(1, hh * 0.6));
-        }
-      }
-      ctx.restore();
     }
 
-    // Bake Minimap Base Image
+    // Bake Minimap Base Image from the real OpenStreetMap + Overpass canvas
     const mctx = this.minimapBaseCanvas.getContext('2d')!;
-    mctx.imageSmoothingEnabled = false;
+    mctx.imageSmoothingEnabled = true;
     mctx.drawImage(canvas, 0, 0, this.minimapBaseCanvas.width, this.minimapBaseCanvas.height);
 
     return {
       terrainTex: new Texture({
-        source: new CanvasSource({ resource: canvas, scaleMode: 'nearest' }),
+        source: new CanvasSource({ resource: canvas, scaleMode: 'linear' }),
       }),
       topoTex: new Texture({
         source: new CanvasSource({ resource: topoCanvas, scaleMode: 'nearest' }),
@@ -1058,19 +886,19 @@ export class WorldRenderer {
         d[p] = 8;
         d[p + 1] = 28;
         d[p + 2] = 36;
-        d[p + 3] = 68;
+        d[p + 3] = 32;
       } else if (exp[i] === 1) {
         // Dynamic Fog (previously explored terrain, currently out of LOS)
         d[p] = 9;
         d[p + 1] = 14;
         d[p + 2] = 18;
-        d[p + 3] = 140;
+        d[p + 3] = 52;
       } else {
-        // Unexplored Shroud
+        // Unobserved Satellite GIS Sector (real OpenStreetMap cartography visible, enemy units hidden)
         d[p] = 6;
-        d[p + 1] = 9;
-        d[p + 2] = 12;
-        d[p + 3] = 228;
+        d[p + 1] = 10;
+        d[p + 2] = 15;
+        d[p + 3] = 78;
       }
     }
 

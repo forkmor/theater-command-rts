@@ -1,18 +1,12 @@
 import type { Bridge, InfraSpline, LandcoverType, Point2D, StrategicNode } from '../core/types';
 import { SeededRNG } from '../core/rng';
-import type { OsmAeroway, OsmSectorData } from './osmBrowserLoader';
 import {
-  BALTIC_COASTLINE_LON_BY_LAT,
-  GIS_BOUNDS,
-  REAL_BORDERS,
-  REAL_BRIDGES,
-  REAL_ELEVATION_FEATURES,
-  REAL_RIVERS,
-  REAL_ROUTES,
-  REAL_SETTLEMENTS,
-  SPIT_POLYGONS,
-  WATER_POLYGONS,
-} from './suwalkiGeoData';
+  projectLatLon,
+  REAL_WORLD_SECTOR_PRESETS,
+  unprojectWorldToLatLon,
+  type OsmAeroway,
+  type OsmSectorData,
+} from './osmBrowserLoader';
 
 export const WORLD_WIDTH = 3200;
 export const WORLD_HEIGHT = 2400;
@@ -22,7 +16,7 @@ export const HM_ROWS = Math.floor(WORLD_HEIGHT / HM_STEP) + 1; // 301
 
 let activeOsmSector: OsmSectorData | null = null;
 
-export function setActiveOsmSector(sector: OsmSectorData | null): void {
+export function setActiveOsmSector(sector: OsmSectorData): void {
   activeOsmSector = sector;
 }
 
@@ -31,58 +25,13 @@ export function getActiveOsmSector(): OsmSectorData | null {
 }
 
 export function latLonToWorld(lat: number, lon: number): Point2D {
-  const b = activeOsmSector ? activeOsmSector.bounds : GIS_BOUNDS;
-  const nx = (lon - b.minLon) / (b.maxLon - b.minLon);
-  const ny = (b.maxLat - lat) / (b.maxLat - b.minLat);
-  return {
-    x: Math.round(nx * WORLD_WIDTH),
-    y: Math.round(ny * WORLD_HEIGHT),
-  };
+  const b = activeOsmSector ? activeOsmSector.bounds : REAL_WORLD_SECTOR_PRESETS[0];
+  return projectLatLon(lat, lon, b, WORLD_WIDTH, WORLD_HEIGHT);
 }
 
 export function worldToLatLon(x: number, y: number): { lat: number; lon: number } {
-  const b = activeOsmSector ? activeOsmSector.bounds : GIS_BOUNDS;
-  const lon = b.minLon + (x / WORLD_WIDTH) * (b.maxLon - b.minLon);
-  const lat = b.maxLat - (y / WORLD_HEIGHT) * (b.maxLat - b.minLat);
-  return { lat, lon };
-}
-
-function pointInPolygon(lat: number, lon: number, poly: Array<[number, number]>): boolean {
-  let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const yi = poly[i][0];
-    const xi = poly[i][1];
-    const yj = poly[j][0];
-    const xj = poly[j][1];
-    const intersect =
-      yi > lat !== yj > lat && lon < ((xj - xi) * (lat - yi)) / (yj - yi + 1e-9) + xi;
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len2 = dx * dx + dy * dy;
-  if (len2 < 1e-4) return Math.hypot(px - ax, py - ay);
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
-  return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
-}
-
-function interpolateCoastlineLon(lat: number): number {
-  const pts = BALTIC_COASTLINE_LON_BY_LAT;
-  if (lat <= pts[0][0]) return pts[0][1];
-  if (lat >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
-  for (let i = 0; i < pts.length - 1; i++) {
-    const [lat0, lon0] = pts[i];
-    const [lat1, lon1] = pts[i + 1];
-    if (lat >= lat0 && lat <= lat1) {
-      const t = (lat - lat0) / (lat1 - lat0);
-      return lon0 + (lon1 - lon0) * t;
-    }
-  }
-  return 20.0;
+  const b = activeOsmSector ? activeOsmSector.bounds : REAL_WORLD_SECTOR_PRESETS[0];
+  return unprojectWorldToLatLon(x, y, b, WORLD_WIDTH, WORLD_HEIGHT);
 }
 
 export interface UrbanBuildingBlock {
@@ -118,21 +67,20 @@ export class SuwalkiMap {
   readonly aeroways: OsmAeroway[] = [];
   readonly treePositions: Array<{ x: number; y: number; kind: number }> = [];
   readonly urbanBlocks: UrbanBuildingBlock[] = [];
-  readonly isLiveOsm: boolean;
+  readonly isLiveOsm = true;
+  readonly tileCanvas: HTMLCanvasElement;
 
   constructor(seed = 541022) {
     this.elevations = new Float32Array(HM_COLS * HM_ROWS);
     this.landcover = new Uint8Array(HM_COLS * HM_ROWS);
     this.roadMask = new Uint8Array(HM_COLS * HM_ROWS);
 
-    if (activeOsmSector) {
-      this.isLiveOsm = true;
-      this.setupFromLiveOsmSector(activeOsmSector, seed);
-    } else {
-      this.isLiveOsm = false;
-      this.setupRealGisVectors();
-      this.generateRealGisTerrain(seed);
+    if (!activeOsmSector) {
+      throw new Error('Real-world OpenStreetMap sector must be loaded before creating SuwalkiMap.');
     }
+
+    this.tileCanvas = activeOsmSector.tileCanvas;
+    this.setupFromLiveOsmSector(activeOsmSector, seed);
   }
 
   private setupFromLiveOsmSector(sector: OsmSectorData, seed: number): void {
@@ -179,12 +127,27 @@ export class SuwalkiMap {
       }
     }
 
-    // Rasterize real OSM water polygons, rivers, coastlines, piers, and forests at grid resolution (401x301)
+    // Rasterize real OSM water polygons, rivers, coastlines, piers, forests + sample real OSM tile pixels
     let waterPixels: Uint8ClampedArray | null = null;
     let pierPixels: Uint8ClampedArray | null = null;
     let forestPixels: Uint8ClampedArray | null = null;
+    let osmTilePixels: Uint8ClampedArray | null = null;
 
     if (typeof document !== 'undefined') {
+      // Sample the stitched OpenStreetMap raster tiles at grid resolution (401x301)
+      if (sector.tileCanvas) {
+        try {
+          const tc = document.createElement('canvas');
+          tc.width = HM_COLS;
+          tc.height = HM_ROWS;
+          const tctx = tc.getContext('2d')!;
+          tctx.drawImage(sector.tileCanvas, 0, 0, HM_COLS, HM_ROWS);
+          osmTilePixels = tctx.getImageData(0, 0, HM_COLS, HM_ROWS).data;
+        } catch {
+          osmTilePixels = null;
+        }
+      }
+
       const makeLayer = (draw: (ctx: CanvasRenderingContext2D) => void) => {
         const c = document.createElement('canvas');
         c.width = HM_COLS;
@@ -201,7 +164,6 @@ export class SuwalkiMap {
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
 
-        // 1. Coastline polygons (in OSM, sea is on the right-hand side of directed coastline ways)
         for (const way of sector.coastlineWays) {
           if (way.length < 2) continue;
           ctx.beginPath();
@@ -209,12 +171,10 @@ export class SuwalkiMap {
           for (let i = 1; i < way.length; i++) {
             ctx.lineTo(way[i].x, way[i].y);
           }
-          // Extend to the right-hand side of the coastline vector to close the sea basin
           const first = way[0];
           const last = way[way.length - 1];
           const dx = last.x - first.x;
           const dy = last.y - first.y;
-          // Right-hand normal in screen coordinates (x right, y down) is (-dy, dx)
           const rx = -dy;
           const ry = dx;
           const cornerX = rx >= 0 ? WORLD_WIDTH + 200 : -200;
@@ -226,7 +186,6 @@ export class SuwalkiMap {
           ctx.fill();
         }
 
-        // 2. Water polygons (lakes, lagoons, riverbanks, harbours)
         for (const poly of sector.waterPolygons) {
           if (poly.length < 3) continue;
           ctx.beginPath();
@@ -238,7 +197,6 @@ export class SuwalkiMap {
           ctx.fill();
         }
 
-        // 3. Rivers & canals stroked at their real meter width
         for (const rv of sector.riverWays) {
           if (rv.points.length < 2) continue;
           ctx.lineWidth = Math.max(10, rv.width);
@@ -285,7 +243,6 @@ export class SuwalkiMap {
       });
     }
 
-    // Evaluate elevation & landcover across the heightmap grid
     const dem = sector.demGrid;
     let minDem = 0;
     if (dem && dem.values.length > 0) {
@@ -299,33 +256,34 @@ export class SuwalkiMap {
         const idx = r * HM_COLS + c;
         const pIdx = idx * 4;
 
+        // Detect water & forest from both Overpass vectors AND real OpenStreetMap tile colors (#aad3df water)
+        let tileWater = false;
+        let tileForest = false;
+        if (osmTilePixels) {
+          const tr = osmTilePixels[pIdx];
+          const tg = osmTilePixels[pIdx + 1];
+          const tb = osmTilePixels[pIdx + 2];
+          // Standard OSM water (#aad3df) or Carto Voyager water (#d4ebff / #aadaff)
+          if (tb > tr + 22 && tb > tg + 6 && tb > 165) {
+            tileWater = true;
+          } else if (tg > tr + 14 && tg > tb + 12 && tg > 140) {
+            tileForest = true;
+          }
+        }
+
         const isPier = pierPixels ? pierPixels[pIdx] > 90 : false;
-        const isWater = !isPier && (waterPixels ? waterPixels[pIdx] > 90 : false);
-        const isForest = !isWater && !isPier && (forestPixels ? forestPixels[pIdx] > 90 : false);
+        const isWater =
+          !isPier && ((waterPixels ? waterPixels[pIdx] > 90 : false) || tileWater);
+        const isForest =
+          !isWater && !isPier && ((forestPixels ? forestPixels[pIdx] > 90 : false) || tileForest);
 
         if (isWater) {
-          // Check if adjacent to land for coastal water vs deep water
-          let nearShore = false;
-          if (waterPixels) {
-            for (let dr = -2; dr <= 2; dr++) {
-              for (let dc = -2; dc <= 2; dc++) {
-                const nr = Math.max(0, Math.min(HM_ROWS - 1, r + dr));
-                const nc = Math.max(0, Math.min(HM_COLS - 1, c + dc));
-                if (waterPixels[(nr * HM_COLS + nc) * 4] <= 90) {
-                  nearShore = true;
-                  break;
-                }
-              }
-              if (nearShore) break;
-            }
-          }
-          this.elevations[idx] = nearShore ? -3.5 : -9.5;
-          this.landcover[idx] = nearShore ? 1 : 0;
+          this.elevations[idx] = -6.5;
+          this.landcover[idx] = 0;
         } else if (isPier) {
           this.elevations[idx] = 3.5;
           this.landcover[idx] = 6;
         } else {
-          // Bilinearly interpolate real DEM grid (relative to sector base + 8m above water)
           let elev = 12 + Math.sin(wx * 0.0025) * 4 + Math.cos(wy * 0.0025) * 4;
           if (dem && dem.values.length === dem.rows * dem.cols) {
             const gx = (c / (HM_COLS - 1)) * (dem.cols - 1);
@@ -350,7 +308,6 @@ export class SuwalkiMap {
       }
     }
 
-    // Stamp urban landcover under real OSM buildings
     for (const b of this.urbanBlocks) {
       const c = Math.max(0, Math.min(HM_COLS - 1, Math.round(b.x / HM_STEP)));
       const r = Math.max(0, Math.min(HM_ROWS - 1, Math.round(b.y / HM_STEP)));
@@ -366,7 +323,6 @@ export class SuwalkiMap {
       }
     }
 
-    // Stamp roadMask along all major highways, railroads, and local streets
     for (const sp of this.splines) {
       const bit = sp.kind === 'highway' ? 1 : 2;
       for (let i = 0; i < sp.points.length - 1; i++) {
@@ -398,11 +354,10 @@ export class SuwalkiMap {
       }
     }
 
-    // Scatter pixel trees in real OSM forest/park polygons
     for (let r = 2; r < HM_ROWS - 2; r += 2) {
       for (let c = 2; c < HM_COLS - 2; c += 2) {
         const idx = r * HM_COLS + c;
-        if (this.landcover[idx] === 4 && this.roadMask[idx] === 0 && rng.next() < 0.62) {
+        if (this.landcover[idx] === 4 && this.roadMask[idx] === 0 && rng.next() < 0.55) {
           this.treePositions.push({
             x: c * HM_STEP + rng.range(-4, 4),
             y: r * HM_STEP + rng.range(-4, 4),
@@ -413,397 +368,6 @@ export class SuwalkiMap {
     }
   }
 
-  private setupRealGisVectors(): void {
-    // 1. Project International Borders
-    for (const b of REAL_BORDERS) {
-      this.borders.push({
-        name: b.name,
-        points: b.points.map(([lat, lon]) => latLonToWorld(lat, lon)),
-      });
-    }
-
-    // 2. Project Real Highways & Railroads (subdividing long legs into ~130px tactical segments)
-    for (const route of REAL_ROUTES) {
-      const rawPts = route.points.map(([lat, lon]) => latLonToWorld(lat, lon));
-      const subdivided: Point2D[] = [rawPts[0]];
-      for (let i = 0; i < rawPts.length - 1; i++) {
-        const a = rawPts[i];
-        const b = rawPts[i + 1];
-        const len = Math.hypot(b.x - a.x, b.y - a.y);
-        const steps = Math.max(1, Math.ceil(len / 135));
-        for (let s = 1; s <= steps; s++) {
-          const t = s / steps;
-          subdivided.push({
-            x: Math.round(a.x + (b.x - a.x) * t),
-            y: Math.round(a.y + (b.y - a.y) * t),
-          });
-        }
-      }
-      this.splines.push({
-        id: route.id,
-        kind: route.kind,
-        name: route.name,
-        points: subdivided,
-        damagedSegments: new Set(),
-      });
-    }
-
-    // 3. Project Real River Bridges & snap each bridge to its route's nearest segment
-    for (const brDef of REAL_BRIDGES) {
-      const pos = latLonToWorld(brDef.lat, brDef.lon);
-      const sp = this.splines.find((s) => s.id === brDef.routeId) ?? this.splines[0];
-      let bestSeg = 0;
-      let bestD = Infinity;
-      let segAngle = 0;
-      for (let i = 0; i < sp.points.length - 1; i++) {
-        const a = sp.points[i];
-        const b = sp.points[i + 1];
-        const d = distToSegment(pos.x, pos.y, a.x, a.y, b.x, b.y);
-        if (d < bestD) {
-          bestD = d;
-          bestSeg = i;
-          segAngle = Math.atan2(b.y - a.y, b.x - a.x);
-        }
-      }
-
-      // Snap bridge center onto the route segment midpoint so road/rail aligns seamlessly
-      const sa = sp.points[bestSeg];
-      const sb = sp.points[bestSeg + 1];
-      const bx = Math.round((sa.x + sb.x) * 0.5);
-      const by = Math.round((sa.y + sb.y) * 0.5);
-
-      this.bridges.push({
-        id: brDef.id,
-        name: brDef.name,
-        kind: brDef.kind,
-        x: bx,
-        y: by,
-        angle: segAngle,
-        length: brDef.length,
-        hp: brDef.kind === 'railroad' ? 650 : 550,
-        maxHp: brDef.kind === 'railroad' ? 650 : 550,
-        destroyed: false,
-        splineId: sp.id,
-        segmentIndex: bestSeg,
-      });
-    }
-
-    // 4. Project Real Cities, Military Bases, Seaports, Airbases & Depots
-    let nid = 1;
-    for (const s of REAL_SETTLEMENTS) {
-      const pos = latLonToWorld(s.lat, s.lon);
-      const radius =
-        s.type === 'airfield' || s.type === 'seaport'
-          ? 62
-          : s.populationRank === 1
-            ? 56
-            : s.populationRank === 2
-              ? 48
-              : 42;
-
-      this.initialNodes.push({
-        id: nid++,
-        name: s.name,
-        type: s.type,
-        faction: s.faction,
-        captureProgress: s.faction === 'blue' ? 100 : s.faction === 'red' ? -100 : 0,
-        capturingFaction: 'neutral',
-        x: pos.x,
-        y: pos.y,
-        radius,
-        hp: s.type === 'hq' ? 1850 : s.populationRank === 1 ? 1150 : 880,
-        maxHp: s.type === 'hq' ? 1850 : s.populationRank === 1 ? 1150 : 880,
-        destroyed: false,
-        supplied: s.faction !== 'neutral',
-        incomeMoney: s.incomeMoney,
-        incomeFuel: s.incomeFuel,
-        incomeAmmo: s.incomeAmmo,
-        radarRange: s.radarRange,
-        runwayAngle:
-          s.runwayHeadingDeg !== undefined ? ((s.runwayHeadingDeg - 90) * Math.PI) / 180 : undefined,
-      });
-    }
-  }
-
-  private generateRealGisTerrain(seed: number): void {
-    const rng = new SeededRNG(seed);
-
-    // Pre-project river polylines into world space for fast distance queries
-    const projectedRivers = REAL_RIVERS.map((rv) => ({
-      name: rv.name,
-      halfWidth: rv.widthMeters * 0.5,
-      depth: rv.depthMeters,
-      pts: rv.points.map(([lat, lon]) => latLonToWorld(lat, lon)),
-    }));
-
-    // 1. Evaluate GIS Bathymetry & SRTM Elevation across the grid
-    for (let r = 0; r < HM_ROWS; r++) {
-      const wy = r * HM_STEP;
-      for (let c = 0; c < HM_COLS; c++) {
-        const wx = c * HM_STEP;
-        const idx = r * HM_COLS + c;
-        const { lat, lon } = worldToLatLon(wx, wy);
-
-        const coastLon = interpolateCoastlineLon(lat);
-        let elev = 16;
-
-        // Check if on Curonian Spit or Vistula Spit barrier islands
-        const onSpit = SPIT_POLYGONS.find((sp) => pointInPolygon(lat, lon, sp.polygon));
-
-        if (onSpit) {
-          elev = onSpit.elevMeters;
-        } else if (lon < coastLon) {
-          // Open Baltic Sea / Gdansk Bay bathymetry
-          const seaDistDeg = coastLon - lon;
-          elev = -Math.min(28, 3.5 + seaDistDeg * 75);
-        } else {
-          // Check Lagoons & Major Lakes (Curonian Lagoon, Vistula Lagoon, Wigry, Vistytis, Mamry, Kaunas Reservoir)
-          const inWaterPoly = WATER_POLYGONS.find((wp) => pointInPolygon(lat, lon, wp.polygon));
-          if (inWaterPoly) {
-            elev = inWaterPoly.depthMeters;
-          } else {
-            // Base continental elevation + SRTM moraine ridges & highlands
-            elev =
-              12 +
-              (lat - 53.55) * 2.5 +
-              (lon - 20.0) * 4.2 +
-              Math.sin(wx * 0.006 + wy * 0.005) * 6 +
-              Math.cos(wx * 0.014 - wy * 0.012) * 4;
-
-            for (const feat of REAL_ELEVATION_FEATURES) {
-              const dLat = (lat - feat.lat) / feat.radiusLat;
-              const dLon = (lon - feat.lon) / feat.radiusLon;
-              const d2 = dLat * dLat + dLon * dLon;
-              if (d2 < 3.4) {
-                elev += (feat.peakMeters - 18) * Math.exp(-d2 * 1.2);
-              }
-            }
-          }
-        }
-
-        // Carve Real Rivers (Neman, Pregolya, Sesupe, Augustow Canal, Minija)
-        if (elev > -8) {
-          for (const rv of projectedRivers) {
-            for (let i = 0; i < rv.pts.length - 1; i++) {
-              const a = rv.pts[i];
-              const b = rv.pts[i + 1];
-              const d = distToSegment(wx, wy, a.x, a.y, b.x, b.y);
-              if (d < rv.halfWidth + 26) {
-                const t = Math.max(0, 1 - d / (rv.halfWidth + 26));
-                const riverElev = d <= rv.halfWidth ? rv.depth : rv.depth * (1 - (d - rv.halfWidth) / 26);
-                elev = Math.min(elev, elev * (1 - t) + riverElev * t);
-              }
-            }
-          }
-        }
-
-        // Ensure Seaports (Klaipeda & Baltiysk) have a dry dock apron AND deepwater harbor channel on their west/seaward side
-        for (const node of this.initialNodes) {
-          const d = Math.hypot(wx - node.x, wy - node.y);
-          if (node.type === 'seaport') {
-            if (d < 46 && wx >= node.x - 12) {
-              elev = 4.5; // Seaport dockyard apron
-            } else if (d < 130 && wx < node.x - 12) {
-              elev = -14; // Deepwater naval channel
-            }
-          } else if (d < node.radius + 26) {
-            const targetFlat =
-              node.type === 'radar_station' ? Math.max(96, elev) : Math.max(9, Math.min(54, elev));
-            const blend = Math.max(0, Math.min(1, (node.radius + 26 - d) / 26));
-            elev = elev * (1 - blend) + targetFlat * blend;
-          }
-        }
-
-        this.elevations[idx] = elev;
-
-        // Classify Landcover (with real forest belts: Augustow Primeval Forest, Rominta/Romincka Forest, Kazlu Ruda Forest, Dzukija National Park)
-        if (elev < -10) {
-          this.landcover[idx] = 0; // deep_water
-        } else if (elev < 0) {
-          this.landcover[idx] = 1; // coastal_water / lagoon / river
-        } else if (elev < 3.0) {
-          this.landcover[idx] = 2; // beach / spit dunes / riverbank
-        } else {
-          // Real major forest zones + natural boreal/mixed patches
-          const inAugustowForest =
-            lat > 53.78 && lat < 54.08 && lon > 22.95 && lon < 23.65;
-          const inRominckaForest =
-            lat > 54.31 && lat < 54.48 && lon > 22.35 && lon < 22.72;
-          const inKazluRudaForest =
-            lat > 54.68 && lat < 54.88 && lon > 23.32 && lon < 23.75;
-          const inDzukijaForest =
-            lat > 53.95 && lat < 54.28 && lon > 23.8 && lon < 24.28;
-
-          const forestNoise =
-            Math.sin(wx * 0.015 + 1.1) * Math.cos(wy * 0.015 - 0.6) +
-            0.5 * Math.sin(wx * 0.033 - wy * 0.029);
-
-          const isForest =
-            inAugustowForest ||
-            inRominckaForest ||
-            inKazluRudaForest ||
-            inDzukijaForest ||
-            (forestNoise > 0.28 && elev < 95);
-
-          this.landcover[idx] = isForest ? 4 : 3;
-        }
-      }
-    }
-
-    // 2. Stamp Real Highway & Railroad Corridors into roadMask
-    for (const spline of this.splines) {
-      const bit = spline.kind === 'highway' ? 1 : 2;
-      for (let i = 0; i < spline.points.length - 1; i++) {
-        const a = spline.points[i];
-        const b = spline.points[i + 1];
-        const segLen = Math.hypot(b.x - a.x, b.y - a.y);
-        const steps = Math.ceil(segLen / 4);
-        for (let s = 0; s <= steps; s++) {
-          const t = s / steps;
-          const px = a.x + (b.x - a.x) * t;
-          const py = a.y + (b.y - a.y) * t;
-          const gc = Math.round(px / HM_STEP);
-          const gr = Math.round(py / HM_STEP);
-          for (let dr = -2; dr <= 2; dr++) {
-            for (let dc = -2; dc <= 2; dc++) {
-              const rr = gr + dr;
-              const cc = gc + dc;
-              if (rr >= 0 && rr < HM_ROWS && cc >= 0 && cc < HM_COLS) {
-                const idx = rr * HM_COLS + cc;
-                if (Math.abs(dr) <= 1 && Math.abs(dc) <= 1) {
-                  this.roadMask[idx] |= bit;
-                }
-                if (this.landcover[idx] === 4) {
-                  this.landcover[idx] = 3; // Clear forest along real highways & railroads
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // 3. Generate Real Urban Street Grids & Building Footprints at Every Real City, Port, Airbase & Town
-    for (const s of REAL_SETTLEMENTS) {
-      const center = latLonToWorld(s.lat, s.lon);
-      const cityRng = new SeededRNG(s.buildingClusterSeed);
-      const urbanSpread = s.populationRank === 1 ? 92 : s.populationRank === 2 ? 64 : 44;
-
-      // Stamp urban / industrial pavement
-      const gr = Math.round(center.y / HM_STEP);
-      const gc = Math.round(center.x / HM_STEP);
-      const radCells = Math.ceil(urbanSpread / HM_STEP);
-      for (let dr = -radCells; dr <= radCells; dr++) {
-        for (let dc = -radCells; dc <= radCells; dc++) {
-          const rr = gr + dr;
-          const cc = gc + dc;
-          if (rr >= 0 && rr < HM_ROWS && cc >= 0 && cc < HM_COLS) {
-            if (dr * dr + dc * dc <= radCells * radCells) {
-              const idx = rr * HM_COLS + cc;
-              if (this.elevations[idx] >= 0.5) {
-                this.landcover[idx] = s.type === 'city' || s.type === 'hq' ? 5 : 6;
-              }
-            }
-          }
-        }
-      }
-
-      // Generate secondary city street grid lines
-      const streetCount = s.populationRank === 1 ? 4 : s.populationRank === 2 ? 3 : 2;
-      const gridStep = 26;
-      for (let i = -streetCount; i <= streetCount; i++) {
-        const offset = i * gridStep;
-        const halfSpan = streetCount * gridStep;
-        if (this.getElevation(center.x + offset, center.y) > 1) {
-          this.cityStreets.push({
-            x1: center.x + offset,
-            y1: center.y - halfSpan,
-            x2: center.x + offset,
-            y2: center.y + halfSpan,
-          });
-        }
-        if (this.getElevation(center.x, center.y + offset) > 1) {
-          this.cityStreets.push({
-            x1: center.x - halfSpan,
-            y1: center.y + offset,
-            x2: center.x + halfSpan,
-            y2: center.y + offset,
-          });
-        }
-      }
-
-      // Generate real urban & industrial building footprints in city blocks
-      for (let bxIdx = -streetCount; bxIdx < streetCount; bxIdx++) {
-        for (let byIdx = -streetCount; byIdx < streetCount; byIdx++) {
-          // Leave central plaza clear for the Strategic Node icon itself
-          if (bxIdx >= -1 && bxIdx <= 0 && byIdx >= -1 && byIdx <= 0) continue;
-
-          const blockCenterX = center.x + (bxIdx + 0.5) * gridStep + cityRng.range(-3, 3);
-          const blockCenterY = center.y + (byIdx + 0.5) * gridStep + cityRng.range(-3, 3);
-          const distFromNode = Math.hypot(blockCenterX - center.x, blockCenterY - center.y);
-          if (distFromNode > urbanSpread + 12) continue;
-          if (this.getElevation(blockCenterX, blockCenterY) < 1.5) continue;
-
-          let kind: UrbanBuildingBlock['kind'] = 'residential';
-          if (s.type === 'oil_depot') kind = cityRng.next() > 0.4 ? 'silo' : 'industrial';
-          else if (s.type === 'ammo_plant' || s.type === 'railhead') kind = 'warehouse';
-          else if (s.type === 'airfield') kind = 'hangar';
-          else if (s.type === 'seaport') kind = 'warehouse';
-          else if (distFromNode < 46) kind = 'civic';
-          else if (cityRng.next() > 0.72) kind = 'industrial';
-
-          this.urbanBlocks.push({
-            x: blockCenterX,
-            y: blockCenterY,
-            w: cityRng.int(12, 20),
-            h: cityRng.int(10, 18),
-            angle: cityRng.next() > 0.5 ? 0 : Math.PI * 0.5,
-            tall: s.populationRank === 1 && distFromNode < 58 && cityRng.next() > 0.35,
-            kind,
-          });
-        }
-      }
-    }
-
-    // Also add dense urban district for Kaliningrad City Proper (54.71°N, 20.50°E) along the Pregolya River!
-    const kgd = latLonToWorld(54.71, 20.5);
-    const kgdRng = new SeededRNG(777);
-    for (let i = -3; i <= 3; i++) {
-      for (let j = -3; j <= 3; j++) {
-        const bx = kgd.x + i * 24;
-        const by = kgd.y + j * 24;
-        if (this.getElevation(bx, by) > 1.5) {
-          this.urbanBlocks.push({
-            x: bx,
-            y: by,
-            w: kgdRng.int(13, 21),
-            h: kgdRng.int(11, 18),
-            angle: 0,
-            tall: Math.hypot(i, j) <= 2,
-            kind: Math.hypot(i, j) <= 1 ? 'civic' : 'residential',
-          });
-        }
-      }
-    }
-
-    // 4. Scatter Pixel Trees across Forest Belts
-    for (let r = 2; r < HM_ROWS - 2; r += 2) {
-      for (let c = 2; c < HM_COLS - 2; c += 2) {
-        const idx = r * HM_COLS + c;
-        if (this.landcover[idx] === 4 && this.roadMask[idx] === 0 && rng.next() < 0.65) {
-          const tx = c * HM_STEP + rng.range(-5, 5);
-          const ty = r * HM_STEP + rng.range(-5, 5);
-          this.treePositions.push({
-            x: tx,
-            y: ty,
-            kind: rng.int(0, 2),
-          });
-        }
-      }
-    }
-  }
-
-  /** Smooth bilinearly-interpolated terrain height in meters at continuous (x, y) */
   getElevation(x: number, y: number): number {
     const cx = Math.max(0, Math.min(WORLD_WIDTH - 0.01, x)) / HM_STEP;
     const cy = Math.max(0, Math.min(WORLD_HEIGHT - 0.01, y)) / HM_STEP;
@@ -859,7 +423,6 @@ export class SuwalkiMap {
     return this.roadMask[r * HM_COLS + c];
   }
 
-  /** Checks if (x, y) lies on an intact rotated bridge deck over a river */
   getIntactBridgeAt(x: number, y: number, bridges: Bridge[]): Bridge | null {
     for (const br of bridges) {
       if (br.destroyed) continue;
@@ -879,7 +442,6 @@ export class SuwalkiMap {
   isPassableForLand(x: number, y: number, bridges: Bridge[], amphibious: boolean): boolean {
     if (x < 24 || x > WORLD_WIDTH - 24 || y < 24 || y > WORLD_HEIGHT - 24) return false;
     if (this.getIntactBridgeAt(x, y, bridges)) return true;
-    // Allow transit along intact causeways/bridges where roadMask is present over minor rivers
     if (this.getRoadMaskAt(x, y) > 0 && this.getElevation(x, y) > -9.5) {
       const nearDestroyedBridge = bridges.some(
         (b) => b.destroyed && Math.hypot(x - b.x, y - b.y) < b.length * 0.55,
@@ -899,9 +461,9 @@ export class SuwalkiMap {
   }
 
   findNearestDeepWater(x: number, y: number): Point2D {
-    for (let rad = 25; rad <= 220; rad += 18) {
+    for (let rad = 25; rad <= 360; rad += 18) {
       for (let a = 0; a < 16; a++) {
-        const ang = Math.PI + ((a - 8) / 16) * Math.PI * 1.5; // prefer West/Baltic side first
+        const ang = (a / 16) * Math.PI * 2;
         const tx = Math.max(40, Math.min(WORLD_WIDTH - 40, x + Math.cos(ang) * rad));
         const ty = Math.max(40, Math.min(WORLD_HEIGHT - 40, y + Math.sin(ang) * rad));
         if (this.isPassableForShip(tx, ty)) {

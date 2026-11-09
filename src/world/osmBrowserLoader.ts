@@ -4,53 +4,111 @@ export interface GisBoundingBox {
   id: string;
   title: string;
   subtitle: string;
+  centerLat: number;
+  centerLon: number;
+  zoom: number;
   minLat: number;
   maxLat: number;
   minLon: number;
   maxLon: number;
+  mercMinX: number;
+  mercMaxX: number;
+  mercMinY: number;
+  mercMaxY: number;
+}
+
+const TILE_SIZE = 256;
+// At zoom 15, 6.0 x 4.5 tiles = 1536 x 1152 native OSM tile pixels (~3.2 km x 2.4 km tactical sector)
+const SPAN_TILES_X = 6.0;
+const SPAN_TILES_Y = 4.5;
+
+export function lonToMercX(lon: number, zoom: number): number {
+  return ((lon + 180) / 360) * TILE_SIZE * Math.pow(2, zoom);
+}
+
+export function latToMercY(lat: number, zoom: number): number {
+  const rad = (lat * Math.PI) / 180;
+  const n = Math.PI - Math.log(Math.tan(Math.PI / 4 + rad / 2));
+  return (n / (2 * Math.PI)) * TILE_SIZE * Math.pow(2, zoom);
+}
+
+export function mercXToLon(mx: number, zoom: number): number {
+  return (mx / (TILE_SIZE * Math.pow(2, zoom))) * 360 - 180;
+}
+
+export function mercYToLat(my: number, zoom: number): number {
+  const n = Math.PI - (2 * Math.PI * my) / (TILE_SIZE * Math.pow(2, zoom));
+  return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+
+export function createMercatorSectorBounds(
+  id: string,
+  title: string,
+  subtitle: string,
+  centerLat: number,
+  centerLon: number,
+  zoom = 15,
+): GisBoundingBox {
+  const cx = lonToMercX(centerLon, zoom);
+  const cy = latToMercY(centerLat, zoom);
+  const halfW = (SPAN_TILES_X * TILE_SIZE) / 2;
+  const halfH = (SPAN_TILES_Y * TILE_SIZE) / 2;
+  const mercMinX = cx - halfW;
+  const mercMaxX = cx + halfW;
+  const mercMinY = cy - halfH;
+  const mercMaxY = cy + halfH;
+
+  return {
+    id,
+    title,
+    subtitle,
+    centerLat,
+    centerLon,
+    zoom,
+    minLon: mercXToLon(mercMinX, zoom),
+    maxLon: mercXToLon(mercMaxX, zoom),
+    maxLat: mercYToLat(mercMinY, zoom), // north is smaller mercY
+    minLat: mercYToLat(mercMaxY, zoom), // south is larger mercY
+    mercMinX,
+    mercMaxX,
+    mercMinY,
+    mercMaxY,
+  };
 }
 
 export const REAL_WORLD_SECTOR_PRESETS: GisBoundingBox[] = [
-  {
-    id: 'suwalki_city',
-    title: 'SUWAŁKI CITY & RAIL BALTICA (54.10°N, 22.93°E)',
-    subtitle:
-      'Real Suwałki street network, PKP Rail Baltica station, Czarna Hańcza river bridges, Arkadia Lake & ~3,500 real OSM buildings (5.2 km × 3.9 km)',
-    minLat: 54.084,
-    maxLat: 54.119,
-    minLon: 22.901,
-    maxLon: 22.961,
-  },
-  {
-    id: 'klaipeda_port',
-    title: 'KLAIPĖDA SEAPORT & MEMEL STRAIT (55.71°N, 21.13°E)',
-    subtitle:
-      'Real Baltic Sea & Curonian Spit strait, Klaipėda naval & container piers, Danė River bridges, rail yards & ~4,200 real OSM buildings (5.2 km × 3.9 km)',
-    minLat: 55.691,
-    maxLat: 55.726,
-    minLon: 21.102,
-    maxLon: 21.166,
-  },
-  {
-    id: 'baltiysk_naval',
-    title: 'BALTIYSK NAVAL BASE & SEA CANAL (54.64°N, 19.90°E)',
-    subtitle:
-      'Real Russian Baltic Fleet naval basins, Pillau 5-point star citadel, Vistula Spit sea canal, rail terminal & dockyard buildings (5.2 km × 3.9 km)',
-    minLat: 54.629,
-    maxLat: 54.664,
-    minLon: 19.872,
-    maxLon: 19.934,
-  },
-  {
-    id: 'kaunas_bridges',
-    title: 'KAUNAS NEMAN CONFLUENCE & BRIDGES (54.89°N, 23.91°E)',
-    subtitle:
-      'Real Neman & Neris river confluence, Vytautas & Čiurlionis highway/rail bridges, Aleksotas runway (EYKS) & dense urban blocks (5.2 km × 3.9 km)',
-    minLat: 54.878,
-    maxLat: 54.913,
-    minLon: 23.876,
-    maxLon: 23.941,
-  },
+  createMercatorSectorBounds(
+    'suwalki_city',
+    'SUWAŁKI, POLAND (54.101°N, 22.931°E)',
+    'Real OpenStreetMap Suwałki city center, PKP Rail Baltica station, Czarna Hańcza river bridges & DW655/S61 arteries',
+    54.1012,
+    22.9308,
+    15,
+  ),
+  createMercatorSectorBounds(
+    'klaipeda_port',
+    'KLAIPĖDA SEAPORT, LITHUANIA (55.706°N, 21.132°E)',
+    'Real OpenStreetMap Klaipėda port piers, Curonian Spit (Smiltynė), Memel Strait, Danė River bridges & rail yards',
+    55.7065,
+    21.1325,
+    15,
+  ),
+  createMercatorSectorBounds(
+    'baltiysk_naval',
+    'BALTIYSK NAVAL BASE, KALININGRAD (54.644°N, 19.896°E)',
+    'Real OpenStreetMap Baltic Fleet naval basins, Pillau 5-point star citadel, Vistula Spit sea canal & rail terminal',
+    54.6442,
+    19.8965,
+    15,
+  ),
+  createMercatorSectorBounds(
+    'kaunas_bridges',
+    'KAUNAS NEMAN BRIDGES, LITHUANIA (54.894°N, 23.905°E)',
+    'Real OpenStreetMap Neman & Neris river confluence, Vytautas & Čiurlionis highway/rail bridges & Aleksotas airfield',
+    54.8945,
+    23.9055,
+    15,
+  ),
 ];
 
 export interface OsmBuildingFootprint {
@@ -86,8 +144,10 @@ export interface OsmAeroway {
 
 export interface OsmSectorData {
   bounds: GisBoundingBox;
-  fetchedFromOverpass: boolean;
+  tileCanvas: HTMLCanvasElement;
+  topoTileCanvas?: HTMLCanvasElement;
   stats: {
+    tilesLoaded: number;
     buildings: number;
     roads: number;
     railways: number;
@@ -125,12 +185,6 @@ interface OverpassElement {
   lon?: number;
   tags?: Record<string, string>;
   geometry?: OverpassGeomPt[];
-  members?: Array<{
-    type: string;
-    ref: number;
-    role: string;
-    geometry?: OverpassGeomPt[];
-  }>;
 }
 
 const OVERPASS_ENDPOINTS = [
@@ -148,8 +202,10 @@ export function projectLatLon(
   worldW: number,
   worldH: number,
 ): Point2D {
-  const nx = (lon - bounds.minLon) / (bounds.maxLon - bounds.minLon);
-  const ny = (bounds.maxLat - lat) / (bounds.maxLat - bounds.minLat);
+  const mx = lonToMercX(lon, bounds.zoom);
+  const my = latToMercY(lat, bounds.zoom);
+  const nx = (mx - bounds.mercMinX) / (bounds.mercMaxX - bounds.mercMinX);
+  const ny = (my - bounds.mercMinY) / (bounds.mercMaxY - bounds.mercMinY);
   return {
     x: nx * worldW,
     y: ny * worldH,
@@ -163,9 +219,12 @@ export function unprojectWorldToLatLon(
   worldW: number,
   worldH: number,
 ): { lat: number; lon: number } {
-  const lon = bounds.minLon + (x / worldW) * (bounds.maxLon - bounds.minLon);
-  const lat = bounds.maxLat - (y / worldH) * (bounds.maxLat - bounds.minLat);
-  return { lat, lon };
+  const mx = bounds.mercMinX + (x / worldW) * (bounds.mercMaxX - bounds.mercMinX);
+  const my = bounds.mercMinY + (y / worldH) * (bounds.mercMaxY - bounds.mercMinY);
+  return {
+    lat: mercYToLat(my, bounds.zoom),
+    lon: mercXToLon(mx, bounds.zoom),
+  };
 }
 
 /**
@@ -178,17 +237,14 @@ export async function geocodeLocationBrowser(query: string): Promise<GisBounding
   if (coordMatch) {
     const lat = Number(coordMatch[1]);
     const lon = Number(coordMatch[2]);
-    const dLat = 0.0175; // ~3.9 km N-S
-    const dLon = dLat / Math.max(0.25, Math.cos((lat * Math.PI) / 180)) * (3200 / 2400) * 0.5;
-    return {
-      id: `custom_${lat.toFixed(4)}_${lon.toFixed(4)}`,
-      title: `CUSTOM SECTOR // ${lat.toFixed(3)}°N ${lon.toFixed(3)}°E`,
-      subtitle: `Live OpenStreetMap tactical sector centered on ${lat.toFixed(4)}, ${lon.toFixed(4)}`,
-      minLat: lat - dLat,
-      maxLat: lat + dLat,
-      minLon: lon - dLon,
-      maxLon: lon + dLon,
-    };
+    return createMercatorSectorBounds(
+      `custom_${lat.toFixed(4)}_${lon.toFixed(4)}`,
+      `OSM SECTOR // ${lat.toFixed(3)}°N ${lon.toFixed(3)}°E`,
+      `Real OpenStreetMap sector centered at ${lat.toFixed(4)}, ${lon.toFixed(4)}`,
+      lat,
+      lon,
+      15,
+    );
   }
 
   const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(trimmed)}`;
@@ -196,7 +252,7 @@ export async function geocodeLocationBrowser(query: string): Promise<GisBounding
     headers: { Accept: 'application/json' },
   });
   if (!res.ok) {
-    throw new Error(`Nominatim geocoder returned HTTP ${res.status}`);
+    throw new Error(`OpenStreetMap Nominatim returned HTTP ${res.status}`);
   }
   const results = (await res.json()) as Array<{
     lat: string;
@@ -211,19 +267,108 @@ export async function geocodeLocationBrowser(query: string): Promise<GisBounding
   const top = results[0];
   const lat = Number(top.lat);
   const lon = Number(top.lon);
-  const dLat = 0.0175; // ~3.9 km N-S
-  const dLon = (dLat / Math.max(0.25, Math.cos((lat * Math.PI) / 180))) * (3200 / 2400);
   const shortName = (top.name || top.display_name.split(',')[0] || trimmed).toUpperCase();
 
-  return {
-    id: `osm_${lat.toFixed(4)}_${lon.toFixed(4)}`,
-    title: `${shortName} (${lat.toFixed(2)}°N, ${lon.toFixed(2)}°E)`,
-    subtitle: top.display_name,
-    minLat: lat - dLat,
-    maxLat: lat + dLat,
-    minLon: lon - dLon * 0.5,
-    maxLon: lon + dLon * 0.5,
-  };
+  return createMercatorSectorBounds(
+    `osm_${lat.toFixed(4)}_${lon.toFixed(4)}`,
+    `${shortName} (${lat.toFixed(3)}°N, ${lon.toFixed(3)}°E)`,
+    top.display_name,
+    lat,
+    lon,
+    15,
+  );
+}
+
+function loadTileImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    const timer = window.setTimeout(() => {
+      img.src = '';
+      reject(new Error('Tile timeout'));
+    }, 8000);
+    img.onload = () => {
+      window.clearTimeout(timer);
+      resolve(img);
+    };
+    img.onerror = () => {
+      window.clearTimeout(timer);
+      reject(new Error(`Failed tile ${url}`));
+    };
+    img.src = url;
+  });
+}
+
+async function fetchSingleOsmTile(z: number, tx: number, ty: number): Promise<HTMLImageElement> {
+  const subs = ['a', 'b', 'c'];
+  const s = subs[Math.abs(tx + ty) % subs.length];
+  const candidates = [
+    `https://tile.openstreetmap.org/${z}/${tx}/${ty}.png`,
+    `https://${s}.basemaps.cartocdn.com/rastertiles/voyager/${z}/${tx}/${ty}.png`,
+    `https://${s}.tile.openstreetmap.fr/hot/${z}/${tx}/${ty}.png`,
+  ];
+  for (const url of candidates) {
+    try {
+      return await loadTileImage(url);
+    } catch {
+      // try next mirror
+    }
+  }
+  throw new Error(`All tile mirrors failed for ${z}/${tx}/${ty}`);
+}
+
+/**
+ * Stitches the real OpenStreetMap Z15 slippy tiles covering `bounds` onto a 1600x1200 canvas.
+ */
+async function fetchOsmRasterTilesCanvas(
+  bounds: GisBoundingBox,
+  canvasW: number,
+  canvasH: number,
+  onProgress?: (msg: string) => void,
+): Promise<{ canvas: HTMLCanvasElement; tilesLoaded: number }> {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvasW;
+  canvas.height = canvasH;
+  const ctx = canvas.getContext('2d')!;
+
+  const z = bounds.zoom;
+  const maxTileIdx = Math.pow(2, z) - 1;
+  const txMin = Math.max(0, Math.floor(bounds.mercMinX / TILE_SIZE));
+  const txMax = Math.min(maxTileIdx, Math.floor((bounds.mercMaxX - 0.001) / TILE_SIZE));
+  const tyMin = Math.max(0, Math.floor(bounds.mercMinY / TILE_SIZE));
+  const tyMax = Math.min(maxTileIdx, Math.floor((bounds.mercMaxY - 0.001) / TILE_SIZE));
+
+  const jobs: Array<Promise<void>> = [];
+  let loaded = 0;
+  const total = (txMax - txMin + 1) * (tyMax - tyMin + 1);
+
+  const spanMercW = bounds.mercMaxX - bounds.mercMinX;
+  const spanMercH = bounds.mercMaxY - bounds.mercMinY;
+
+  for (let ty = tyMin; ty <= tyMax; ty++) {
+    for (let tx = txMin; tx <= txMax; tx++) {
+      jobs.push(
+        fetchSingleOsmTile(z, tx, ty)
+          .then((img) => {
+            const tileMercX = tx * TILE_SIZE;
+            const tileMercY = ty * TILE_SIZE;
+            const dx = ((tileMercX - bounds.mercMinX) / spanMercW) * canvasW;
+            const dy = ((tileMercY - bounds.mercMinY) / spanMercH) * canvasH;
+            const dw = (TILE_SIZE / spanMercW) * canvasW;
+            const dh = (TILE_SIZE / spanMercH) * canvasH;
+            ctx.drawImage(img, dx, dy, dw + 0.5, dh + 0.5);
+            loaded++;
+            onProgress?.(`Loaded OpenStreetMap tiles (${loaded}/${total})...`);
+          })
+          .catch(() => {
+            // tile failed
+          }),
+      );
+    }
+  }
+
+  await Promise.all(jobs);
+  return { canvas, tilesLoaded: loaded };
 }
 
 async function fetchRealDemGrid(
@@ -253,14 +398,14 @@ async function fetchRealDemGrid(
       return { rows, cols, values: json.elevation };
     }
   } catch {
-    // Fall back to OSM hydrography + local relief if Open-Meteo is unreachable
+    // ignore
   }
   return undefined;
 }
 
 /**
- * Fetches real roads, bridges, railways, waterways, coastlines, piers, landuse,
- * and every building polygon directly from OpenStreetMap Overpass API in the user's browser.
+ * Fetches both the real OpenStreetMap Z15 tile map AND live Overpass API vector geometry
+ * (buildings, roads, railways, bridges, water, runways) directly in the user's browser.
  */
 export async function fetchLiveOsmSector(
   bounds: GisBoundingBox,
@@ -268,24 +413,29 @@ export async function fetchLiveOsmSector(
   worldH: number,
   onProgress?: (status: string) => void,
 ): Promise<OsmSectorData> {
-  const cacheKey = `${bounds.minLat.toFixed(4)},${bounds.minLon.toFixed(4)},${bounds.maxLat.toFixed(4)},${bounds.maxLon.toFixed(4)}`;
+  const cacheKey = `${bounds.zoom}:${bounds.minLat.toFixed(4)},${bounds.minLon.toFixed(4)},${bounds.maxLat.toFixed(4)},${bounds.maxLon.toFixed(4)}`;
   const cached = memoryCache.get(cacheKey);
   if (cached) {
     onProgress?.(
-      `OSM LIVE READY: ${cached.stats.buildings.toLocaleString()} buildings • ${cached.stats.roads} roads • ${cached.stats.bridges} bridges`,
+      `OSM LIVE READY: ${cached.stats.tilesLoaded} OSM tiles • ${cached.stats.buildings.toLocaleString()} buildings • ${cached.stats.roads} streets`,
     );
     return cached;
   }
 
+  onProgress?.(`Loading real OpenStreetMap tiles & Overpass vectors for ${bounds.title}...`);
+
+  // 1. Start OpenStreetMap Raster Tile Stitching & DEM Elevation in parallel with Overpass API
+  const tilesPromise = fetchOsmRasterTilesCanvas(bounds, worldW / 2, worldH / 2, onProgress);
+  const demPromise = fetchRealDemGrid(bounds, 8, 8);
+
+  // 2. Fast, bounding-box-clipped Overpass QL query (no unbounded relations that hang Overpass!)
   const bboxStr = `${bounds.minLat.toFixed(5)},${bounds.minLon.toFixed(5)},${bounds.maxLat.toFixed(5)},${bounds.maxLon.toFixed(5)}`;
-  const query = `[out:json][timeout:25][bbox:${bboxStr}];
+  const query = `[out:json][timeout:14][bbox:${bboxStr}];
 (
-  way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|residential|unclassified|living_street|service|pedestrian)$"];
+  way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|residential|unclassified|service)$"];
   way["railway"~"^(rail|light_rail|narrow_gauge|tram)$"];
-  way["waterway"~"^(river|canal|dock|fairway|stream|riverbank)$"];
-  way["natural"~"^(water|coastline|bay|strait|wood|scrub)$"];
-  relation["natural"="water"];
-  relation["waterway"="riverbank"];
+  way["waterway"~"^(river|canal|dock|fairway|riverbank)$"];
+  way["natural"~"^(water|coastline|bay|strait|wood)$"];
   way["landuse"~"^(reservoir|basin|harbour|port|industrial|military|forest)$"];
   way["aeroway"~"^(runway|taxiway|apron|hangar|helipad)$"];
   way["man_made"~"^(pier|breakwater|quay|bridge|storage_tank|silo)$"];
@@ -293,21 +443,15 @@ export async function fetchLiveOsmSector(
   node["place"~"^(city|town|suburb|quarter|neighbourhood|village)$"];
   node["railway"~"^(station|halt|yard)$"];
 );
-out body geom qt;`;
+out body geom(${bboxStr}) qt;`;
 
-  onProgress?.(`Querying OpenStreetMap Overpass API (${bounds.title})...`);
-
-  let elements: OverpassElement[] | null = null;
-  let lastErr = '';
-
-  const demPromise = fetchRealDemGrid(bounds, 8, 8);
+  let elements: OverpassElement[] = [];
 
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
       const host = new URL(endpoint).hostname;
-      onProgress?.(`Streaming real GIS vectors from ${host}...`);
       const ctrl = new AbortController();
-      const timeoutId = window.setTimeout(() => ctrl.abort(), 18000);
+      const timeoutId = window.setTimeout(() => ctrl.abort(), 11000);
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: {
@@ -317,31 +461,41 @@ out body geom qt;`;
         signal: ctrl.signal,
       });
       window.clearTimeout(timeoutId);
-      if (!res.ok) {
-        lastErr = `${host} HTTP ${res.status}`;
-        continue;
-      }
+      if (!res.ok) continue;
       const data = (await res.json()) as { elements?: OverpassElement[] };
       if (data && Array.isArray(data.elements) && data.elements.length > 0) {
         elements = data.elements;
+        onProgress?.(`Streamed ${elements.length.toLocaleString()} vectors from ${host}...`);
         break;
       }
-    } catch (err) {
-      lastErr = err instanceof Error ? err.message : String(err);
+    } catch {
+      // try next Overpass mirror
     }
   }
 
-  const demGrid = await demPromise;
+  const [{ canvas: tileCanvas, tilesLoaded }, demGrid] = await Promise.all([
+    tilesPromise,
+    demPromise,
+  ]);
 
-  if (!elements) {
-    throw new Error(`Overpass API unreachable (${lastErr || 'network blocked'})`);
+  if (tilesLoaded === 0 && elements.length === 0) {
+    throw new Error(
+      'Browser could not reach OpenStreetMap tile servers or Overpass API. Check browser network connection.',
+    );
   }
 
-  onProgress?.(`Parsing ${elements.length.toLocaleString()} real OpenStreetMap features...`);
-  const parsed = parseOverpassElementsToSector(elements, bounds, worldW, worldH, demGrid);
+  const parsed = parseOverpassElementsToSector(
+    elements,
+    bounds,
+    worldW,
+    worldH,
+    tileCanvas,
+    tilesLoaded,
+    demGrid,
+  );
   memoryCache.set(cacheKey, parsed);
   onProgress?.(
-    `OSM LIVE: ${parsed.stats.buildings.toLocaleString()} real buildings • ${parsed.stats.roads} streets/highways • ${parsed.stats.railways} rails • ${parsed.stats.bridges} bridges`,
+    `OSM LIVE READY // ${tilesLoaded} OSM Tiles • ${parsed.stats.buildings.toLocaleString()} Buildings • ${parsed.stats.roads} Streets • ${parsed.stats.bridges} Bridges`,
   );
   return parsed;
 }
@@ -364,6 +518,8 @@ function parseOverpassElementsToSector(
   bounds: GisBoundingBox,
   worldW: number,
   worldH: number,
+  tileCanvas: HTMLCanvasElement,
+  tilesLoaded: number,
   demGrid?: { rows: number; cols: number; values: number[] },
 ): OsmSectorData {
   const splines: InfraSpline[] = [];
@@ -384,8 +540,10 @@ function parseOverpassElementsToSector(
   const industrialCenters: Array<{ name: string; x: number; y: number }> = [];
   const militaryCenters: Array<{ name: string; x: number; y: number }> = [];
 
-  const metersPerPixel =
-    ((bounds.maxLat - bounds.minLat) * 111320) / worldH; // ~1.6m per pixel at 3.9km height
+  const metersPerPixel = Math.max(
+    0.5,
+    ((bounds.maxLat - bounds.minLat) * 111320) / worldH,
+  );
 
   for (const el of elements) {
     const tags = el.tags || {};
@@ -402,24 +560,16 @@ function parseOverpassElementsToSector(
       continue;
     }
 
-    if (el.type === 'relation' && el.members) {
-      if (tags.natural === 'water' || tags.waterway === 'riverbank' || tags.landuse === 'reservoir') {
-        for (const m of el.members) {
-          if ((m.role === 'outer' || m.role === '') && m.geometry && m.geometry.length >= 3) {
-            const poly = m.geometry.map((g) => projectLatLon(g.lat, g.lon, bounds, worldW, worldH));
-            waterPolygons.push(simplifyPolyline(poly, 2.5));
-          }
-        }
-      }
-      continue;
-    }
-
     if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
-    const pts = el.geometry.map((g) => projectLatLon(g.lat, g.lon, bounds, worldW, worldH));
+    const pts = el.geometry
+      .filter((g) => g && typeof g.lat === 'number' && typeof g.lon === 'number')
+      .map((g) => projectLatLon(g.lat, g.lon, bounds, worldW, worldH));
+    if (pts.length < 2) continue;
+
     const first = pts[0];
     const last = pts[pts.length - 1];
     const isClosed =
-      pts.length >= 4 && Math.hypot(first.x - last.x, first.y - last.y) < 6;
+      pts.length >= 4 && Math.hypot(first.x - last.x, first.y - last.y) < 8;
 
     // 1. Real Buildings, Hangars & Storage Silos
     if (
@@ -451,10 +601,8 @@ function parseOverpassElementsToSector(
       cy /= n;
       const w = Math.max(4, maxX - minX);
       const h = Math.max(4, maxY - minY);
-      // Skip tiny sheds (< 2.5px) or huge non-building boundary boxes (> 450px)
-      if ((w < 3 && h < 3) || w > 450 || h > 450) continue;
+      if ((w < 3 && h < 3) || w > 550 || h > 550) continue;
 
-      // Principal edge angle from longest polygon edge
       let bestLen = 0;
       let angle = 0;
       for (let i = 0; i < poly.length; i++) {
@@ -545,11 +693,10 @@ function parseOverpassElementsToSector(
       continue;
     }
 
-    if (tags.waterway === 'river' || tags.waterway === 'canal' || tags.waterway === 'stream') {
-      const defaultMeters =
-        tags.waterway === 'river' ? 32 : tags.waterway === 'canal' ? 20 : 8;
+    if (tags.waterway === 'river' || tags.waterway === 'canal') {
+      const defaultMeters = tags.waterway === 'river' ? 30 : 18;
       const parsedW = parseFloat(tags.width || '') || defaultMeters;
-      const pxWidth = Math.max(4, Math.min(90, parsedW / metersPerPixel));
+      const pxWidth = Math.max(6, Math.min(90, parsedW / metersPerPixel));
       riverWays.push({
         points: simplifyPolyline(pts, 3),
         width: pxWidth,
@@ -568,7 +715,7 @@ function parseOverpassElementsToSector(
       if (isClosed && pts.length >= 4) {
         pierPolygons.push(simplifyPolyline(pts, 2));
       } else {
-        pierWays.push({ points: simplifyPolyline(pts, 2), width: 10 });
+        pierWays.push({ points: simplifyPolyline(pts, 2), width: 12 });
       }
       harbourCenters.push({
         name: tags.name || 'Port Pier',
@@ -579,7 +726,7 @@ function parseOverpassElementsToSector(
     }
 
     // 4. Real Forests & Landuse Zones
-    if (tags.natural === 'wood' || tags.natural === 'scrub' || tags.landuse === 'forest') {
+    if (tags.natural === 'wood' || tags.landuse === 'forest') {
       if (pts.length >= 3) {
         forestPolygons.push(simplifyPolyline(pts, 4));
       }
@@ -607,7 +754,7 @@ function parseOverpassElementsToSector(
     ) {
       const kind = tags.aeroway as OsmAeroway['kind'];
       const widthPx =
-        kind === 'runway' ? 24 : kind === 'apron' ? 32 : kind === 'taxiway' ? 10 : 16;
+        kind === 'runway' ? 26 : kind === 'apron' ? 34 : kind === 'taxiway' ? 12 : 18;
       aeroways.push({
         points: simplifyPolyline(pts, 3),
         kind,
@@ -618,12 +765,11 @@ function parseOverpassElementsToSector(
 
     // 6. Real Railways
     if (tags.railway && /^(rail|light_rail|narrow_gauge|tram)$/.test(tags.railway)) {
-      // Skip service/spur tracks shorter than 50px unless main rail
       let totalLen = 0;
       for (let i = 0; i < pts.length - 1; i++) {
         totalLen += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
       }
-      if (tags.service && totalLen < 110) continue;
+      if (tags.service && totalLen < 120) continue;
 
       const simp = simplifyPolyline(pts, 6);
       const splineId = `osm_rail_${el.id}`;
@@ -635,7 +781,7 @@ function parseOverpassElementsToSector(
         damagedSegments: new Set(),
       });
 
-      if (tags.bridge && tags.bridge !== 'no' && totalLen >= 18) {
+      if (tags.bridge && tags.bridge !== 'no' && totalLen >= 16) {
         const midIdx = Math.floor((simp.length - 1) / 2);
         const a = simp[midIdx];
         const b = simp[Math.min(simp.length - 1, midIdx + 1)];
@@ -682,14 +828,14 @@ function parseOverpassElementsToSector(
 
       const widthPx =
         hClass.startsWith('motorway') || hClass.startsWith('trunk')
-          ? 12
+          ? 13
           : hClass.startsWith('primary')
-            ? 10
+            ? 11
             : hClass.startsWith('secondary')
-              ? 8
+              ? 9
               : hClass.startsWith('tertiary')
-                ? 6.5
-                : 4.5;
+                ? 7
+                : 5;
 
       cityStreets.push({
         points: simp,
@@ -698,7 +844,7 @@ function parseOverpassElementsToSector(
         name: tags.name || tags.ref,
       });
 
-      if (isMajor && totalLen >= 45) {
+      if (isMajor && totalLen >= 40) {
         const splineId = `osm_hwy_${el.id}`;
         splines.push({
           id: splineId,
@@ -708,7 +854,7 @@ function parseOverpassElementsToSector(
           damagedSegments: new Set(),
         });
 
-        if (tags.bridge && tags.bridge !== 'no' && totalLen >= 18) {
+        if (tags.bridge && tags.bridge !== 'no' && totalLen >= 16) {
           const midIdx = Math.floor((simp.length - 1) / 2);
           const a = simp[midIdx];
           const b = simp[Math.min(simp.length - 1, midIdx + 1)];
@@ -741,7 +887,6 @@ function parseOverpassElementsToSector(
     }
   }
 
-  // Build real strategic nodes anchored to the actual OpenStreetMap infrastructure
   const initialNodes = buildStrategicNodesFromRealOsm(
     bounds,
     worldW,
@@ -759,8 +904,9 @@ function parseOverpassElementsToSector(
 
   return {
     bounds,
-    fetchedFromOverpass: true,
+    tileCanvas,
     stats: {
+      tilesLoaded,
       buildings: buildings.length,
       roads: cityStreets.length,
       railways: splines.filter((s) => s.kind === 'railroad').length,
@@ -872,7 +1018,6 @@ function buildStrategicNodesFromRealOsm(
     });
   };
 
-  // 1. Place Blue HQ (South-East / East) & Red HQ (North-West / West) snapped to real road network
   const blueHqPos = snapToNearestRoadOrBuilding(worldW * 0.76, worldH * 0.74);
   const redHqPos = snapToNearestRoadOrBuilding(worldW * 0.24, worldH * 0.26);
   const sectorShort = bounds.title.split('(')[0].trim();
@@ -880,12 +1025,14 @@ function buildStrategicNodesFromRealOsm(
   pushNode(`${sectorShort} South-East HQ`, 'hq', 'blue', blueHqPos.x, blueHqPos.y, 18, 12, 12);
   pushNode(`${sectorShort} North-West HQ`, 'hq', 'red', redHqPos.x, redHqPos.y, 18, 12, 12);
 
-  // 2. Real Railheads (from actual OSM railway stations or railway tracks)
   const railSplines = splines.filter((s) => s.kind === 'railroad');
   let blueRailPt: Point2D | null = null;
   let redRailPt: Point2D | null = null;
   for (const rs of railStations) {
-    if (Math.hypot(rs.x - blueHqPos.x, rs.y - blueHqPos.y) < Math.hypot(rs.x - redHqPos.x, rs.y - redHqPos.y)) {
+    if (
+      Math.hypot(rs.x - blueHqPos.x, rs.y - blueHqPos.y) <
+      Math.hypot(rs.x - redHqPos.x, rs.y - redHqPos.y)
+    ) {
       if (!blueRailPt && isFarEnough(rs.x, rs.y, 180)) blueRailPt = rs;
     } else {
       if (!redRailPt && isFarEnough(rs.x, rs.y, 180)) redRailPt = rs;
@@ -930,7 +1077,6 @@ function buildStrategicNodesFromRealOsm(
     12,
   );
 
-  // 3. Real Airfields (from OSM aeroway=runway/helipad/apron, or forward air strips)
   const runway = aeroways.find((a) => a.kind === 'runway' && a.points.length >= 2);
   if (runway) {
     const a = runway.points[0];
@@ -938,7 +1084,7 @@ function buildStrategicNodesFromRealOsm(
     const rAngle = Math.atan2(b.y - a.y, b.x - a.x);
     const rx = Math.max(160, Math.min(worldW - 160, (a.x + b.x) * 0.5));
     const ry = Math.max(160, Math.min(worldH - 160, (a.y + b.y) * 0.5));
-    pushNode('Municipal Airfield Runway', 'airfield', 'blue', rx, ry, 8, 8, 10, rAngle);
+    pushNode('Airfield Runway', 'airfield', 'blue', rx, ry, 8, 8, 10, rAngle);
   } else {
     const bAir = snapToNearestRoadOrBuilding(worldW * 0.82, worldH * 0.55);
     pushNode('East Tactical Airbase', 'airfield', 'blue', bAir.x, bAir.y, 8, 8, 10, -0.2);
@@ -946,7 +1092,6 @@ function buildStrategicNodesFromRealOsm(
   const rAir = snapToNearestRoadOrBuilding(worldW * 0.18, worldH * 0.48);
   pushNode('West Tactical Airbase', 'airfield', 'red', rAir.x, rAir.y, 8, 8, 10, 0.15);
 
-  // 4. Real Seaports / Harbours (if harbour/pier features exist)
   if (harbourCenters.length > 0) {
     const hc1 = harbourCenters[0];
     const bx = Math.max(140, Math.min(worldW - 140, hc1.x));
@@ -962,7 +1107,6 @@ function buildStrategicNodesFromRealOsm(
     }
   }
 
-  // 5. Real OSM Neighbourhoods, Towns & Districts (`place=*`)
   for (const pl of placeNodes) {
     if (nodes.length >= 16) break;
     if (isFarEnough(pl.x, pl.y, 240)) {
@@ -970,7 +1114,6 @@ function buildStrategicNodesFromRealOsm(
     }
   }
 
-  // 6. Real Industrial / Fuel / Munitions Complexes (`landuse=industrial|military` or warehouse clusters)
   for (const ind of industrialCenters) {
     if (nodes.length >= 19) break;
     if (isFarEnough(ind.x, ind.y, 240)) {
@@ -995,12 +1138,11 @@ function buildStrategicNodesFromRealOsm(
     }
   }
 
-  // 7. Fill remaining tactical sectors at real road/building intersections so every map has ~14-16 rich objectives
   const candidateTargets: Array<{ x: number; y: number; type: StrategicNode['type']; label: string }> = [
     { x: worldW * 0.5, y: worldH * 0.5, type: 'city', label: 'Central District Junction' },
-    { x: worldW * 0.52, y: worldH * 0.28, type: 'radar_station', label: 'North Ridge Overwatch Radar' },
+    { x: worldW * 0.52, y: worldH * 0.28, type: 'radar_station', label: 'North Overwatch Radar' },
     { x: worldW * 0.36, y: worldH * 0.64, type: 'oil_depot', label: 'Fuel Storage Terminal' },
-    { x: worldW * 0.64, y: worldH * 0.36, type: 'ammo_plant', label: 'Logistics Munitions Depot' },
+    { x: worldW * 0.64, y: worldH * 0.36, type: 'ammo_plant', label: 'Munitions Supply Depot' },
     { x: worldW * 0.35, y: worldH * 0.38, type: 'city', label: 'West Crossroad Sector' },
     { x: worldW * 0.65, y: worldH * 0.62, type: 'city', label: 'East Crossroad Sector' },
   ];
